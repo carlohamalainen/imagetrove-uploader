@@ -1,0 +1,128 @@
+name:                imagetrove-uploader
+version:             0.1.0.0
+synopsis:            Upload instrument datasets to Image Trove.
+-- description:
+homepage:            https://github.com/carlohamalainen/imagetrove-uploader
+license:             BSD2
+license-file:        LICENSE
+author:              Carlo Hamalainen, The Centre for Advanced Imaging (The University of Queensland).
+maintainer:          c.hamalainen@uq.edu.au
+-- copyright:
+category:            Network
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  exposed-modules:   Data.Dicom
+                   , Network.ImageTrove.Main
+                   , Network.ImageTrove.Utils
+                   , Network.MyTardis.API
+                   , Network.MyTardis.Instances
+                   , Network.MyTardis.MyTardis
+                   , Network.MyTardis.Types
+                   , Network.MyTardis.RestTypes
+  -- other-modules:
+  -- other-extensions:
+  build-depends:       base >=4.6 && <4.7
+                     , wreq
+                     , time
+                     , convertible
+                     , unix
+                     , directory
+                     , Unixutils
+                     , process
+                     , filepath
+                     , temporary
+                     , transformers
+                     , mtl
+                     , aeson
+                     , containers
+                     , text
+                     , bytestring
+                     , mime-types
+                     , http-client
+                     , lens
+                     , process-streaming <= 0.3.0.0
+                     , pipes-bytestring
+                     , optparse-applicative
+                     , mtl
+                     , wreq
+                     , lens
+                     , bytestring
+                     , cryptohash
+                     , parsec
+                     , filepath
+                     , directory
+                     , transformers
+                     , Unixutils
+                     , unix
+                     , process
+                     , temporary
+                     , containers
+                     , aeson
+                     , safe
+                     , bytestring
+                     , tagsoup
+                     , configurator
+                     , filemanip
+                     , cassava
+                     , vector
+                     , text
+
+  hs-source-dirs:      src
+  default-language:    Haskell2010
+
+
+executable imagetrove-uploader
+  main-is:           Main.hs
+  ghc-options:       -threaded
+
+  build-depends:       base >=4.6 && <4.7
+                     , wreq
+                     , time
+                     , convertible
+                     , unix
+                     , directory
+                     , Unixutils
+                     , process
+                     , filepath
+                     , temporary
+                     , transformers
+                     , mtl
+                     , aeson
+                     , containers
+                     , text
+                     , bytestring
+                     , mime-types
+                     , http-client
+                     , lens
+                     , process-streaming <= 0.3.0.0
+                     , pipes-bytestring
+                     , optparse-applicative
+                     , mtl
+                     , wreq
+                     , lens
+                     , bytestring
+                     , cryptohash
+                     , parsec
+                     , filepath
+                     , directory
+                     , transformers
+                     , Unixutils
+                     , unix
+                     , process
+                     , temporary
+                     , containers
+                     , aeson
+                     , safe
+                     , bytestring
+                     , tagsoup
+                     , configurator
+                     , filemanip
+                     , cassava
+                     , vector
+                     , text
+                     , imagetrove-uploader
+
+  default-language:    Haskell2010
