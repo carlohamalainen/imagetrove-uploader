@@ -504,6 +504,14 @@ handyParameterSet paramset = do
         case (name, value) of (Success name', Just value') -> return $ Just (name', value')
                               _                            -> return Nothing
 
+getOrCreateUser  :: Maybe String -> Maybe String -> String -> [RestGroup] -> Bool -> ReaderT MyTardisConfig IO (Result RestUser)
+getOrCreateUser firstname lastname username groups isSuperuser = do
+    users <- traverse (filter (((==) username) . ruserUsername)) <$> getUsers
+
+    case users of
+        []              -> createUser firstname lastname username groups isSuperuser 
+        [Success user]  -> return $ Success user
+        _               -> return $ Error $ "Duplicate users found with username: " ++ username
 
 -- | Get a Group with a given name, or create it if it doesn't already exist. Will fail if
 -- a duplicate group name is discovered.
@@ -593,8 +601,14 @@ fromSuccess :: Result a -> a
 fromSuccess (Success s) = s
 fromSuccess _ = error "derp"
 
--- uploadFileBasic  :: RestDataset -> FilePath -> [(String, M.Map String String)] -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
-uploadFileBasic identifyDatasetFile d f m = do
+uploadFileBasic
+    :: String
+    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile)
+    -> RestDataset
+    -> FilePath
+    -> [(String, M.Map String String)]
+    -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
+uploadFileBasic schemaFile identifyDatasetFile d f m = do
     meta <- liftIO $ calcFileMetadata f
 
     liftIO $ print ("METADATA FOR FILE", m)
@@ -610,14 +624,14 @@ uploadFileBasic identifyDatasetFile d f m = do
         Nothing                        -> return $ Error "FIXME1234"
 
 createSchemasIfMissing :: (String, String, String) -> ReaderT MyTardisConfig IO (Result (RestSchema, RestSchema, RestSchema))
-createSchemasIfMissing (schemaExperiment, schemaDataset, schemaDicomFile) = do
+createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
     schemas <- getSchemas
 
     case schemas of
         Error e -> return $ Error e
         Success schemas' -> do experimentSchema <- createIfMissing "DICOM Metadata Experiment" schemaExperiment SchemaExperiment  schemas'
                                datasetSchema    <- createIfMissing "DICOM Metadata Dataset"    schemaDataset    SchemaDataset     schemas'
-                               fileSchema       <- createIfMissing "DICOM Metadata File"       schemaDicomFile  SchemaDatasetFile schemas'
+                               fileSchema       <- createIfMissing "DICOM Metadata File"       schemaFile       SchemaDatasetFile schemas'
 
                                return $ case (experimentSchema, datasetSchema, fileSchema) of
                                          (Success experimentSchema', Success datasetSchema', Success fileSchema') -> Success (experimentSchema', datasetSchema', fileSchema')
@@ -635,9 +649,19 @@ createSchemasIfMissing (schemaExperiment, schemaDataset, schemaDicomFile) = do
 
 
 -- uploadDicomAsMinc :: ([DicomFile] -> IdentifiedExperiment) -> FilePath -> FilePath -> ReaderT MyTardisConfig IO ()
-uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaDicomFile) = do
+--uploadDicomAsMinc  :: [DicomFile -> Bool]   -- ^ Filters to match instrument.
+--                   -> [DicomFile -> Maybe String] -- ^ Fields to use in the experiment's title.
+--                   -> [DicomFile -> Maybe String] -- ^ Fields to use in the dataset's title.
+--                   -> (String -> [DicomFile -> Maybe String] -> [DicomFile] -> Maybe IdentifiedExperiment)              -- ^ Identify an experiment.
+--                   -> ([DicomFile -> Maybe String] -> RestExperiment -> [DicomFile] -> Maybe IdentifiedDataset)         -- ^ Identify a dataset.
+--                   -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile) -- ^ Identify a file.
+--                   -> FilePath  -- ^ Source directory.
+--                   -> FilePath  -- ^ Processed directory.
+--                   -> (String, String, String) -- ^ Schema URIs for experiments, dataset, and files, respectively.
+--                   -> ReaderT MyTardisConfig IO ()
+uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
 
-    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaDicomFile)
+    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
 
     -- FIXME Chuck a wobbly if the schemas aren't successfully made/found.
     -- FIXME Schema names should be configurable - and then we get to deal with name changes etc.
@@ -648,9 +672,13 @@ uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir pro
     _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
-    let groups = groupDicomFiles _files
+    let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
 
-    liftIO $ print groups
+    -- liftIO $ print groups
+
+    -- liftIO $ forM_ groups $ \files -> do
+    --     forM_ files (putStrLn . dicomFilePath)
+    -- error $ show $ length groups
 
     -- FIXME Just doing some defaults at the moment, dangerously
     -- assuming Success at each step.
@@ -660,7 +688,8 @@ uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir pro
     addUserToGroup admin adminGroup
 
     forM_ groups $ \files -> do
-        let ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment files
+        -- FIXME Just pattern...
+        let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress experimentFields files
 
         -- Now pack the dicom files as Minc
         dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
@@ -672,7 +701,8 @@ uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir pro
 
                                   addGroupReadOnlyAccess e adminGroup
 
-                                  let ids@(IdentifiedDataset desc experiments metadata) = identifyDataset e files
+                                  -- FIXME Just pattern...
+                                  let Just ids@(IdentifiedDataset desc experiments metadata) = identifyDataset schemaDataset datasetFields e files
 
                                   d <- fromSuccess <$> createDataset ids
                                   liftIO $ print d
@@ -681,7 +711,7 @@ uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir pro
                                   liftIO $ forM_ mincFiles mncToMnc2 -- FIXME check results
 
                                   let oneFile = head files -- FIXME unsafe
-                                      filemetadata = [(schemaDicomFile, M.fromList
+                                      filemetadata = [(schemaFile, M.fromList
                                                                             [ ("PatientID",          fromMaybe "(PatientID missing)"   $ dicomPatientID         oneFile)
                                                                             , ("StudyInstanceUID",   fromMaybe "(StudyInstanceUID missing)"    $ dicomStudyInstanceUID  oneFile)
                                                                             , ("SeriesInstanceUID",  fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID oneFile)
@@ -692,13 +722,13 @@ uploadDicomAsMinc identifyExperiment identifyDataset identifyDatasetFile dir pro
                                                      ]
 
                                   forM_ mincFiles $ \f -> do
-                                        dsf <- uploadFileBasic identifyDatasetFile d f filemetadata
+                                        dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
                                         liftIO $ print dsf
 
                                         thumbnail <- liftIO $ createMincThumbnail f
 
                                         case thumbnail of
-                                            Right thumbnail' -> do dsft <- uploadFileBasic identifyDatasetFile d thumbnail' filemetadata
+                                            Right thumbnail' -> do dsft <- uploadFileBasic schemaFile identifyDatasetFile d thumbnail' filemetadata
                                                                    liftIO $ print dsft
                                             Left e           -> liftIO $ putStrLn $ "Error while creating thumbnail: " ++ e ++ " for file " ++ f
 

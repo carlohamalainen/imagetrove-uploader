@@ -485,7 +485,6 @@ handyParameterSet paramset = do
         case (name, value) of (Success name', Just value') -> return $ Just (name', value')
                               _                            -> return Nothing
 
-
 -- | Get a Group with a given name, or create it if it doesn't already exist. Will fail if
 -- a duplicate group name is discovered.
 getOrCreateGroup  :: String -> ReaderT MyTardisConfig IO (Result RestGroup)

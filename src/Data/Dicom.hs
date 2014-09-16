@@ -69,9 +69,14 @@ createLinksDirectoryFromList :: [FilePath] -> IO FilePath
 createLinksDirectoryFromList dicomFiles = do
     tempDir <- createTempDirectory "/tmp" "dicomConversion"
 
+    print dicomFiles
+
     forM_ dicomFiles $ \f -> do
         sourceName <- canonicalizePath f
-        createSymbolicLink sourceName $ tempDir </> (takeFileName f)
+        let target = tempDir </> (takeFileName f)
+
+        print $ ("createLinksDirectoryFromList", sourceName, target)
+        createSymbolicLink sourceName target
 
     return tempDir
 
@@ -159,6 +164,7 @@ pInstitutionalDepartmentName = parseField "(0008,1040) LO"
 pReferringPhysicianName      = parseField "(0008,0090) PN"
 
 pManufacturerModelName       = parseField "(0008,1090) LO"
+pManufacturer                = parseField "(0008,0070) LO"
 
 parseSingleMatch :: ParsecT String () Identity String -> String -> Maybe String
 parseSingleMatch p s = case parses of
@@ -167,6 +173,52 @@ parseSingleMatch p s = case parses of
                             _                        -> Nothing
   where
     parses = rights $ map (parse p "(parseSingleMatch)") (lines s)
+
+
+fieldToFn "PatientName"         = dicomPatientName
+fieldToFn "PatientID"           = dicomPatientID
+fieldToFn "PatientBirthDate"    = dicomPatientBirthDate
+fieldToFn "PatientSex"          = dicomPatientSex
+fieldToFn "PatientAge"          = dicomPatientAge
+fieldToFn "PatientWeight"       = dicomPatientWeight
+fieldToFn "PatientPosition"     = dicomPatientPosition
+
+fieldToFn "StudyDate"           = dicomStudyDate
+fieldToFn "StudyTime"           = dicomStudyTime
+fieldToFn "StudyDescription"    = dicomStudyDescription
+fieldToFn "StudyInstanceID"     = dicomStudyInstanceID
+fieldToFn "StudyID"             = dicomStudyID
+
+fieldToFn "SeriesDate"              = dicomSeriesDate
+fieldToFn "SeriesTime"              = dicomSeriesTime
+fieldToFn "SeriesDescription"       = dicomSeriesDescription
+fieldToFn "SeriesInstanceUID"       = dicomSeriesInstanceUID
+fieldToFn "SeriesNumber"            = dicomSeriesNumber
+fieldToFn "CSASeriesHeaderType"     = dicomCSASeriesHeaderType
+fieldToFn "CSASeriesHeaderVersion"  = dicomCSASeriesHeaderVersion
+fieldToFn "CSASeriesHeaderInfo"     = dicomCSASeriesHeaderInfo
+fieldToFn "SeriesWorkflowStatus"    = dicomSeriesWorkflowStatus
+
+fieldToFn "MediaStorageSOPInstanceUID"  = dicomMediaStorageSOPInstanceUID
+fieldToFn "InstanceCreationDate"        = dicomInstanceCreationDate
+fieldToFn "InstanceCreationTime"        = dicomInstanceCreationTime
+fieldToFn "SOPInstanceUID"              = dicomSOPInstanceUID
+fieldToFn "StudyInstanceUID"            = dicomStudyInstanceUID
+fieldToFn "InstanceNumber"              = dicomInstanceNumber
+
+fieldToFn "InstitutionName"             = dicomInstitutionName
+fieldToFn "InstitutionAddress"          = dicomInstitutionAddress
+fieldToFn "InstitutionalDepartmentName" = dicomInstitutionalDepartmentName
+
+fieldToFn "ReferringPhysicianName"  = dicomReferringPhysicianName
+
+fieldToFn "ManufacturerModelName"   = dicomManufacturerModelName
+fieldToFn "Manufacturer"            = dicomManufacturer
+
+fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Check your configuration file."
+
+tupleToIdentifierFn :: (String, String) -> (DicomFile -> Bool)
+tupleToIdentifierFn (field, value) = \d -> (fieldToFn field) d == Just value
 
 data DicomFile = DicomFile
     { dicomFilePath                   :: FilePath
@@ -209,6 +261,7 @@ data DicomFile = DicomFile
     , dicomReferringPhysicianName       :: Maybe String
 
     , dicomManufacturerModelName        :: Maybe String
+    , dicomManufacturer                 :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -259,6 +312,7 @@ readDicomMetadata fileName = do
                                     (parseHere pReferringPhysicianName)
 
                                     (parseHere pManufacturerModelName)
+                                    (parseHere pManufacturer)
 
 getDicomFilesInDirectory :: String -> FilePath -> IO [FilePath]
 getDicomFilesInDirectory suffix dir = filter (isLowerSuffix suffix) <$> getFilesInDirectory dir
@@ -268,14 +322,29 @@ getDicomFilesInDirectory suffix dir = filter (isLowerSuffix suffix) <$> getFiles
     getFilesInDirectory :: FilePath -> IO [FilePath]
     getFilesInDirectory d = map (d </>) <$> filter (not . (`elem` [".", ".."])) <$> getDirectoryContents d >>= filterM doesFileExist
 
-groupDicomFiles :: [DicomFile] -> [[DicomFile]]
-groupDicomFiles files = fmap (map snd) $ groupBy ((==) `on` fst) (sortOn fst $ map toTuple files)
+
+groupDicomFiles :: [DicomFile -> Bool]
+                -> [DicomFile -> Maybe String]
+                -> [DicomFile -> Maybe String]
+                -> [DicomFile] -> [[DicomFile]]
+groupDicomFiles instrumentFilters titleFields datasetFields files = fmap (map snd) $ groupBy ((==) `on` fst) (sortOn fst $ map toTuple files')
 
   where
 
-    toTuple file = ((dicomPatientID file, dicomPatientName file, dicomStudyDescription file, dicomSeriesDescription file), file)
+    -- Only the files that match all of the filters:
+    files' = concatMap maybeToList $ nub $ (map toMaybeIf instrumentFilters) <*> files
+
+    toMaybeIf :: (a -> Bool) -> a -> Maybe a
+    toMaybeIf f filename = if f filename then Just filename else Nothing
+
+    toTuple file = ((titleFields <*> [file], datasetFields <*> [file]), file)
 
     -- https://ghc.haskell.org/trac/ghc/ticket/9004
     sortOn :: Ord b => (a -> b) -> [a] -> [a]
     sortOn f = map snd . sortBy (comparing fst)
                        . map (\x -> let y = f x in y `seq` (y, x))
+
+
+
+
+
