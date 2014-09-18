@@ -19,7 +19,6 @@ library
                    , Network.ImageTrove.Utils
                    , Network.MyTardis.API
                    , Network.MyTardis.Instances
-                   , Network.MyTardis.MyTardis
                    , Network.MyTardis.Types
                    , Network.MyTardis.RestTypes
   -- other-modules:
