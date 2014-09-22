@@ -1,4 +1,3 @@
-imagetrove-uploader
-===================
+# imagetrove-uploader
 
-Upload instrument datasets to Image Trove
+Upload instrument datasets to [ImageTrove](https://github.com/carlohamalainen/imagetrove).
