@@ -21,6 +21,7 @@ library
                    , Network.MyTardis.Instances
                    , Network.MyTardis.Types
                    , Network.MyTardis.RestTypes
+                   , Network.Orthanc.API
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.6 && <4.7

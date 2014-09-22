@@ -14,6 +14,7 @@ import Data.Aeson (Result(..))
 import Data.Either
 import Data.Maybe
 import Control.Applicative
+import Control.Exception.Base (catch, IOException(..))
 import Control.Lens
 import Control.Monad
 import Control.Monad.Identity
@@ -48,6 +49,7 @@ import qualified Data.ByteString.Lazy   as BL
 import qualified Data.ByteString.Char8  as B8
 
 import qualified Data.Text as T
+import Text.Printf (printf)
 import qualified Data.Map as M
 
 import Data.Dicom
@@ -412,15 +414,22 @@ mkParameterSet schema nameValuePairs = object
     , ("parameters", toJSON $ map mkParameter nameValuePairs)
     ]
 
-copyFileToStore :: FilePath -> RestDatasetFile -> IO ()
-copyFileToStore filepath dsf = forM_ (dsfReplicas dsf) $ \r -> do
-    let filePrefix = "file://" :: String
-        target = replicaURL r
+copyFileToStore :: FilePath -> RestDatasetFile -> IO ([Result FilePath])
+copyFileToStore filepath dsf = do
+    results <- forM (dsfReplicas dsf) $ \r -> do
+        let filePrefix = "file://" :: String
+            target = replicaURL r
 
-    when (not (replicaVerified r) && isPrefixOf filePrefix target) $ do
-        let targetFilePath = drop (length filePrefix) target
-        print (filepath, targetFilePath)
-        copyFile filepath targetFilePath
+        if (not $ isPrefixOf filePrefix target)
+            then return $ Error $ "Unknown prefix: %s " ++ target
+            else
+                if (not $ replicaVerified r)
+                    then do let targetFilePath = drop (length filePrefix) target
+                            catch (copyFile filepath targetFilePath >> return (Success targetFilePath))
+                                  (\e -> return $ Error $ show (e :: IOException))
+                    else return $ Success filepath
+
+    return results
 
 deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response ())
 deleteExperiment x = do
@@ -596,11 +605,6 @@ addGroupAccess canDelete canRead canWrite experiment group = do
     eqOn :: Eq b => (a -> b) -> a -> a -> Bool
     eqOn f x y = (f x) == (f y)
 
--- FIXME only for testing, get rid of this.
-fromSuccess :: Result a -> a
-fromSuccess (Success s) = s
-fromSuccess _ = error "derp"
-
 uploadFileBasic
     :: String
     -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile)
@@ -611,17 +615,23 @@ uploadFileBasic
 uploadFileBasic schemaFile identifyDatasetFile d f m = do
     meta <- liftIO $ calcFileMetadata f
 
-    liftIO $ print ("METADATA FOR FILE", m)
-
+    -- This would be tidier if we worked in the Success monad?
     case meta of
         Just  (filepath, md5sum, size) -> do let idf = identifyDatasetFile d filepath md5sum size m
+                                             dsf <- createFileLocation idf
 
-                                             dsf <- fromSuccess <$> createFileLocation idf -- FIXME fromSuccess...
-                                             liftIO $ print f
-                                             liftIO $ copyFileToStore f dsf
+                                             case dsf of Success dsf' -> do results <- liftIO $ copyFileToStore f dsf'
+                                                                            return $ case allSuccesses results of
+                                                                                Success _ -> Success dsf'
+                                                                                Error e   -> Error e
+                                                         Error e      -> return $ Error e
+        Nothing                        -> return $ Error $ "Failed to calculate checksum for " ++ f
 
-                                             return $ Success dsf
-        Nothing                        -> return $ Error "FIXME1234"
+allSuccesses :: [Result a] -> Result String
+allSuccesses []               = Success "All Success or empty list."
+allSuccesses ((Success _):xs) = allSuccesses xs
+allSuccesses ((Error e):_)    = Error e
+
 
 createSchemasIfMissing :: (String, String, String) -> ReaderT MyTardisConfig IO (Result (RestSchema, RestSchema, RestSchema))
 createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
@@ -697,14 +707,14 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
             Right mincFiles -> do _e <- createExperiment ie
                                   liftIO $ print _e
 
-                                  let e = fromSuccess _e
+                                  let Success e = _e -- FIXME
 
                                   addGroupReadOnlyAccess e adminGroup
 
                                   -- FIXME Just pattern...
                                   let Just ids@(IdentifiedDataset desc experiments metadata) = identifyDataset schemaDataset datasetFields e files
 
-                                  d <- fromSuccess <$> createDataset ids
+                                  Success d <- createDataset ids -- FIXME
                                   liftIO $ print d
 
                                   -- Convert to MINC 2.0

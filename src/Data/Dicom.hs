@@ -73,7 +73,7 @@ createLinksDirectoryFromList dicomFiles = do
 
     forM_ dicomFiles $ \f -> do
         sourceName <- canonicalizePath f
-        let target = tempDir </> (takeFileName f)
+        let target = tempDir </> (takeFileName f ++ ".dcm")
 
         print $ ("createLinksDirectoryFromList", sourceName, target)
         createSymbolicLink sourceName target

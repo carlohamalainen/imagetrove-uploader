@@ -15,4 +15,4 @@ import Text.Printf (printf)
 
 import Network.ImageTrove.Main
 
-main = dicomMain
+main = imageTroveMain

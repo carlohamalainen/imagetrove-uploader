@@ -8,6 +8,7 @@ import Control.Monad.Reader
 import Control.Monad (when)
 import Data.Configurator
 import Data.Configurator.Types
+import Data.Monoid (mempty)
 import Data.Traversable (traverse)
 import Data.Either
 import qualified Data.Foldable as DF
@@ -25,17 +26,21 @@ import Network.ImageTrove.Utils
 import Network.MyTardis.API
 import Network.MyTardis.RestTypes
 import Network.MyTardis.Types
+import Network.Orthanc.API
 
 data Command
     = CmdUploadAll       UploadAllOptions
     | CmdUploadOne       UploadOneOptions
     | CmdShowExperiments ShowExperimentsOptions
+    | CmdUploadFromDicomServer UploadFromDicomServerOptions
     deriving (Eq, Show)
 
 data UploadAllOptions = UploadAllOptions { uploadAllDryRun :: Bool } deriving (Eq, Show)
 data UploadOneOptions = UploadOneOptions { uploadOneHash :: String } deriving (Eq, Show)
 
 data ShowExperimentsOptions = ShowExperimentsOptions { showFileSets :: Bool } deriving (Eq, Show)
+
+data UploadFromDicomServerOptions = UploadFromDicomServerOptions () deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
     { optDirectory  :: Maybe FilePath
@@ -55,6 +60,10 @@ pUploadOneOptions = CmdUploadOne <$> UploadOneOptions <$> strOption (long "hash"
 pShowExprOptions :: Parser Command
 pShowExprOptions = CmdShowExperiments <$> ShowExperimentsOptions <$> switch (long "show-file-sets" <> help "Show experiments.")
 
+pUploadFromDicomServerOptions :: Parser Command
+-- pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> (option auto mempty <|> pure ())
+pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> (pure ())
+
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
     <$> optional (strOption (long "input-dir"     <> metavar "DIRECTORY" <> help "Directory with DICOM files."))
@@ -63,10 +72,11 @@ pUploaderOptions = UploaderOptions
     <*>          (strOption (long "processed-dir" <> metavar "DIRECTORY" <> help "Directory for processed DICOM files."))
     <*> subparser x
   where
-    x    = cmd1 <> cmd2 <> cmd3
-    cmd1 = command "upload-all"       (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
-    cmd2 = command "upload-one"       (info (helper <*> pUploadOneOptions) (progDesc "Upload a single experiment."))
-    cmd3 = command "show-experiments" (info (helper <*> pShowExprOptions)  (progDesc "Show local experiments."))
+    x    = cmd1 <> cmd2 <> cmd3 <> cmd4
+    cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
+    cmd2 = command "upload-one"               (info (helper <*> pUploadOneOptions) (progDesc "Upload a single experiment."))
+    cmd3 = command "show-experiments"         (info (helper <*> pShowExprOptions)  (progDesc "Show local experiments."))
+    cmd4 = command "upload-from-dicom-server" (info (helper <*> pUploadFromDicomServerOptions) (progDesc "Upload from DICOM server."))
 
 getDicomDir :: UploaderOptions -> FilePath
 getDicomDir opts = fromMaybe "." (optDirectory opts)
@@ -84,26 +94,36 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
 
-    let groups = undefined -- FIXME groupDicomFiles _files
-    -- liftIO $ print groups
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ groups $ \files -> do
-        let
-            IdentifiedExperiment desc institution title metadata = undefined -- FIXME identifyExperiment files
-            hash = (sha256 . unwords) (map dicomFilePath files)
+    forM_ instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress) -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
+                                                                    forM_ groups $ \files -> do
+                                                                        let
+                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress experimentFields files
+                                                                            hash = (sha256 . unwords) (map dicomFilePath files)
 
-        liftIO $ if showFileSets cmdShow
-            then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
-            else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
+                                                                        liftIO $ if showFileSets cmdShow
+                                                                            then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
+                                                                            else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
+
 
 dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \(instrumentFilters, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (optProcessedDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (optProcessedDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"
- 
+
     cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
 
     A.Success experiments <- getExperiments
@@ -119,7 +139,18 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
 
-    let groups = undefined -- FIXME  groupDicomFiles _files
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
+
+    let groups = concat $ (flip map) instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
 
     let
         hashes = map (hashFiles . fmap dicomFilePath) groups :: [String]
@@ -129,15 +160,55 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
                     []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
                     _       -> error "Multiple experiments with the same hash. Oh noes!"
 
-{-
-main = do
-    config <- load [Required "sample.conf"]
+dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer _)) = do
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    display config
--}
+    forM_ instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress) -> do
+            Right ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
-dicomMain :: IO ()
-dicomMain = do
+            forM_ ogroups $ \(patient, study, series, oneInstance, tags) -> do
+                Just (tempDir, zipfile) <- liftIO $ getSeriesArchive $ oseriesID series
+
+                -- FIXME Tidy up links and temp dir.
+
+                Right linksDir <- liftIO $ unpackArchive tempDir zipfile
+                liftIO $ print linksDir
+
+                uploadDicomAsMinc
+                    instrumentFilters
+                    experimentFields
+                    datasetFields
+                    identifyExperiment
+                    identifyDataset
+                    identifyDatasetFile
+                    linksDir
+                    "/tmp/p"
+                    ( schemaExperiment
+                    , schemaDataset
+                    , schemaDicomFile
+                    , defaultInstitutionName
+                    , defaultInstitutionalDepartmentName
+                    , defaultInstitutionalAddress)
+
+    -- FIXME Just for testing, create some accounts and assign all experiments to these users.
+    A.Success project12345 <- getOrCreateGroup "Project 12345"
+
+    cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
+
+    A.Success experiments <- getExperiments
+    forM_ experiments $ (flip addGroupReadOnlyAccess) project12345
+
+imageTroveMain :: IO ()
+imageTroveMain = do
     opts' <- execParser opts
 
     let host = fromMaybe "http://localhost:8000" $ optHost opts'
@@ -250,7 +321,7 @@ grabMetadata file = map oops $ concatMap f metadata
     f (Just x,  desc) = [(x, desc)]
     f (Nothing, _)    = []
 
-    metadata = 
+    metadata =
         [ (dicomPatientName            file, "Patient Name")
         , (dicomPatientID              file, "Patient ID")
         , (dicomPatientBirthDate       file, "Patient Birth Date")
@@ -297,7 +368,7 @@ getConfig host f = do
 
     user <- lookup cfg "user" :: IO (Maybe String)
     pass <- lookup cfg "pass" :: IO (Maybe String)
-  
+
     return $ case (user, pass) of
         (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass'
         _                        -> Nothing
@@ -307,6 +378,7 @@ readInstrumentConfigs
   :: FilePath
      -> IO
           [([DicomFile -> Bool],
+            [(String, String)],
             [DicomFile -> Maybe String],
             [DicomFile -> Maybe String],
             String, String, String, String, String, String)]
@@ -324,11 +396,13 @@ readInstrumentConfig
        -> T.Text
        -> IO
             ([DicomFile -> Bool],
+             [(String, String)],
              [DicomFile -> Maybe String],
              [DicomFile -> Maybe String],
              String, String, String, String, String, String)
 readInstrumentConfig cfg instrumentName = do
     instrumentFields <- (liftM $ map toIdentifierFn) <$> lookup cfg (instrumentName `T.append` ".instrument")
+    instrumentFieldsT<- (liftM $ map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
     experimentFields <- (liftM $ map fieldToFn)      <$> lookup cfg (instrumentName `T.append` ".experiment_title")
     datasetFields    <- (liftM $ map fieldToFn)      <$> lookup cfg (instrumentName `T.append` ".dataset_title")
 
@@ -341,6 +415,7 @@ readInstrumentConfig cfg instrumentName = do
     defaultInstitutionalAddress         <- lookup cfg (instrumentName `T.append` ".default_institutional_address")
 
     when (isNothing instrumentFields) $ error $ "Bad/missing 'instrument' field for "       ++ (T.unpack instrumentName)
+    when (isNothing instrumentFieldsT)$ error $ "Bad/missing 'instrument' field for "       ++ (T.unpack instrumentName)
     when (isNothing experimentFields) $ error $ "Bad/missing 'experiment_title' field for " ++ (T.unpack instrumentName)
     when (isNothing datasetFields)    $ error $ "Bad/missing 'dataset_title' field for "    ++ (T.unpack instrumentName)
 
@@ -352,8 +427,18 @@ readInstrumentConfig cfg instrumentName = do
     when (isNothing defaultInstitutionalDepartmentName)  $ error $ "Bad/missing 'default_institutional_department_name" ++ (T.unpack instrumentName)
     when (isNothing defaultInstitutionalAddress)         $ error $ "Bad/missing 'default_institutional_address"         ++ (T.unpack instrumentName)
 
-    case (instrumentFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) of
-        (Just instrumentFields', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress') -> return (instrumentFields', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress')
+    case ( instrumentFields
+         , instrumentFieldsT
+         , experimentFields
+         , datasetFields
+         , schemaExperiment
+         , schemaDataset
+         , schemaFile
+         , defaultInstitutionName
+         , defaultInstitutionalDepartmentName
+         , defaultInstitutionalAddress
+         ) of
+        (Just instrumentFields', Just instrumentFieldsT', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress') -> return (instrumentFields', instrumentFieldsT', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress')
         _ -> error "Unhandled case."
 
   where
@@ -361,5 +446,9 @@ readInstrumentConfig cfg instrumentName = do
     toIdentifierFn :: [String] -> (DicomFile -> Bool)
     toIdentifierFn [field, value] = tupleToIdentifierFn (field, value)
     toIdentifierFn x = error $ "Too many items specified: " ++ show x
+
+    toIdentifierTuple :: [String] -> (String, String)
+    toIdentifierTuple [field, value] = (field, value)
+    toIdentifierTuple x = error $ "Too many items specified: " ++ show x
 
 
