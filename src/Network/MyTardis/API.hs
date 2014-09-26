@@ -232,6 +232,11 @@ calcFileMetadata _filepath = do
         Left _        -> Nothing
 
 -- | Create a location for a dataset file in MyTARDIS.
+-- This is sort of wrong - it either returns an existing matching file
+-- or creates a new one. But in our use case we end up trying to use copyfiletostore and
+-- that gives errors like
+--      Error "Unknown prefix: 7/10/e4e9e4c4-8d98f872-06c01206-656bc087-a9a33151.zip
+-- because the file exists. FIXME
 createFileLocation :: IdentifiedFile -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
 createFileLocation idf@(IdentifiedFile datasetURL filepath md5sum size metadata) = do
     -- Match on just the base bit of the file, not the whole path.
@@ -421,7 +426,7 @@ copyFileToStore filepath dsf = do
             target = replicaURL r
 
         if (not $ isPrefixOf filePrefix target)
-            then return $ Error $ "Unknown prefix: %s " ++ target
+            then return $ Error $ "Unknown prefix: " ++ target
             else
                 if (not $ replicaVerified r)
                     then do let targetFilePath = drop (length filePrefix) target
@@ -670,9 +675,6 @@ createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
 --                   -> (String, String, String) -- ^ Schema URIs for experiments, dataset, and files, respectively.
 --                   -> ReaderT MyTardisConfig IO ()
 uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
-
-    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
-
     -- FIXME Chuck a wobbly if the schemas aren't successfully made/found.
     -- FIXME Schema names should be configurable - and then we get to deal with name changes etc.
 
@@ -682,78 +684,83 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
     _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
+    liftIO $ putStrLn $ "uploadDicomAsMinc: |_files| = " ++ (show $ length _files)
+
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
+    liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    -- liftIO $ print groups
+    forM_ groups $ \files -> uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
 
-    -- liftIO $ forM_ groups $ \files -> do
-    --     forM_ files (putStrLn . dicomFilePath)
-    -- error $ show $ length groups
+uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
 
+    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
+ 
     -- FIXME Just doing some defaults at the moment, dangerously
     -- assuming Success at each step.
     Success users <- getUsers
     let admin = head $ filter ((==) "admin" . ruserUsername) users -- FIXME assumes account exists...
     Success adminGroup <- getOrCreateGroup "admin"
     addUserToGroup admin adminGroup
+    liftIO $ putStrLn $ "uploadDicomAsMinc: set admin group."
 
-    forM_ groups $ \files -> do
-        -- FIXME Just pattern...
-        let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress experimentFields files
+    let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment
+                                                                            schemaExperiment
+                                                                            defaultInstitutionName
+                                                                            defaultInstitutionalDepartmentName
+                                                                            defaultInstitutionalAddress
+                                                                            experimentFields
+                                                                            files
 
-        -- Now pack the dicom files as Minc
-        dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
-        case dicom of
-            Right mincFiles -> do _e <- createExperiment ie
-                                  liftIO $ print _e
+    Success e <- createExperiment ie -- FIXME pattern
+    liftIO $ putStrLn $ "uploadDicomAsMinc: " ++ show e
+    addGroupReadOnlyAccess e adminGroup
+ 
+    -- FIXME Just pattern...
+    let Just ids@(IdentifiedDataset desc experiments metadata) = identifyDataset schemaDataset datasetFields e files
 
-                                  let Success e = _e -- FIXME
+    Success d <- createDataset ids -- FIXME
+    liftIO $ putStrLn $ "uploadDicomAsMinc: " ++ show d
 
-                                  addGroupReadOnlyAccess e adminGroup
+    let oneFile = head files -- FIXME unsafe
+        filemetadata = [(schemaFile, M.fromList
+                                            [ ("PatientID",          fromMaybe "(PatientID missing)"   $ dicomPatientID         oneFile)
+                                            , ("StudyInstanceUID",   fromMaybe "(StudyInstanceUID missing)"    $ dicomStudyInstanceUID  oneFile)
+                                            , ("SeriesInstanceUID",  fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID oneFile)
+                                            , ("StudyDescription",  fromMaybe "(StudyDescription missing)" $ dicomStudyDescription oneFile)
+                                            ]
+                        )
+                       ]
 
-                                  -- FIXME Just pattern...
-                                  let Just ids@(IdentifiedDataset desc experiments metadata) = identifyDataset schemaDataset datasetFields e files
+    -- Now pack the dicom files as Minc
+    dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
+    case dicom of
+        Right mincFiles -> do -- Convert to MINC 2.0
+                              liftIO $ forM_ mincFiles mncToMnc2 -- FIXME check results
 
-                                  Success d <- createDataset ids -- FIXME
-                                  liftIO $ print d
+                              forM_ mincFiles $ \f -> do
+                                    liftIO $ putStrLn $ "uploadDicomAsMinc: minc file f: " ++ show f
+                                    dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
+                                    liftIO $ putStrLn $ "uploadDicomAsMinc: dsf: " ++ show dsf
 
-                                  -- Convert to MINC 2.0
-                                  liftIO $ forM_ mincFiles mncToMnc2 -- FIXME check results
+                                    thumbnail <- liftIO $ createMincThumbnail f
+                                    liftIO $ putStrLn $ "uploadDicomAsMinc: thumbnail: " ++ show thumbnail
 
-                                  let oneFile = head files -- FIXME unsafe
-                                      filemetadata = [(schemaFile, M.fromList
-                                                                            [ ("PatientID",          fromMaybe "(PatientID missing)"   $ dicomPatientID         oneFile)
-                                                                            , ("StudyInstanceUID",   fromMaybe "(StudyInstanceUID missing)"    $ dicomStudyInstanceUID  oneFile)
-                                                                            , ("SeriesInstanceUID",  fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID oneFile)
-
-                                                                            , ("StudyDescription",  fromMaybe "(StudyDescription missing)" $ dicomStudyDescription oneFile)
-                                                                            ]
-                                                      )
-                                                     ]
-
-                                  forM_ mincFiles $ \f -> do
-                                        dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
-                                        liftIO $ print dsf
-
-                                        thumbnail <- liftIO $ createMincThumbnail f
-
-                                        case thumbnail of
-                                            Right thumbnail' -> do dsft <- uploadFileBasic schemaFile identifyDatasetFile d thumbnail' filemetadata
-                                                                   liftIO $ print dsft
-                                            Left e           -> liftIO $ putStrLn $ "Error while creating thumbnail: " ++ e ++ " for file " ++ f
+                                    case thumbnail of
+                                        Right thumbnail' -> do dsft <- uploadFileBasic schemaFile identifyDatasetFile d thumbnail' filemetadata
+                                                               liftIO $ putStrLn $ "uploadDicomAsMinc: dsft: " ++ show dsft
+                                        Left e           -> liftIO $ putStrLn $ "Error while creating thumbnail: " ++ e ++ " for file " ++ f
 
 
-        -- FIXME Need to catch IO exceptions earlier...
-        {-
-        liftIO $ forM_ files $ \f -> do
-            let f' = dicomFilePath f
+    -- FIXME Need to catch IO exceptions earlier...
+    {-
+    liftIO $ forM_ files $ \f -> do
+        let f' = dicomFilePath f
 
-            copyFile f' (processedDir </> (takeFileName f'))
-            -- FIXME check exceptions
-            -- FIXME check if target exists and make backup instead...
-            liftIO $ putStrLn $ "Removing: " ++ f'
-            removeFile f'
-        -}
+        copyFile f' (processedDir </> (takeFileName f'))
+        -- FIXME check exceptions
+        -- FIXME check if target exists and make backup instead...
+        liftIO $ putStrLn $ "Removing: " ++ f'
+        removeFile f'
+    -}
 
-    return ()
-
+    return (e, d)

@@ -40,14 +40,14 @@ data UploadOneOptions = UploadOneOptions { uploadOneHash :: String } deriving (E
 
 data ShowExperimentsOptions = ShowExperimentsOptions { showFileSets :: Bool } deriving (Eq, Show)
 
-data UploadFromDicomServerOptions = UploadFromDicomServerOptions () deriving (Eq, Show)
+data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomDryRun :: Bool } deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
-    { optDirectory  :: Maybe FilePath
-    , optHost       :: Maybe String
-    , optConfigFile :: FilePath
-    , optProcessedDir :: FilePath
-    , optCommand    :: Command
+    { optDirectory      :: Maybe FilePath
+    , optHost           :: Maybe String
+    , optConfigFile     :: FilePath
+    , optProcessedDir   :: Maybe FilePath
+    , optCommand        :: Command
     }
     deriving (Eq, Show)
 
@@ -61,15 +61,14 @@ pShowExprOptions :: Parser Command
 pShowExprOptions = CmdShowExperiments <$> ShowExperimentsOptions <$> switch (long "show-file-sets" <> help "Show experiments.")
 
 pUploadFromDicomServerOptions :: Parser Command
--- pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> (option auto mempty <|> pure ())
-pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> (pure ())
+pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> switch (long "dry-run" <> help "Dry run.")
 
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
     <$> optional (strOption (long "input-dir"     <> metavar "DIRECTORY" <> help "Directory with DICOM files."))
     <*> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
     <*>          (strOption (long "config"        <> metavar "CONFIG"    <> help "Configuration file."))
-    <*>          (strOption (long "processed-dir" <> metavar "DIRECTORY" <> help "Directory for processed DICOM files."))
+    <*> optional (strOption (long "processed-dir" <> metavar "DIRECTORY" <> help "Directory for processed DICOM files."))
     <*> subparser x
   where
     x    = cmd1 <> cmd2 <> cmd3 <> cmd4
@@ -176,14 +175,19 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer _)) = do
             Right ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             forM_ ogroups $ \(patient, study, series, oneInstance, tags) -> do
-                Just (tempDir, zipfile) <- liftIO $ getSeriesArchive $ oseriesID series
+                Right (tempDir, zipfile) <- liftIO $ getSeriesArchive $ oseriesID series
+
+                liftIO $ print (tempDir, zipfile)
 
                 -- FIXME Tidy up links and temp dir.
 
                 Right linksDir <- liftIO $ unpackArchive tempDir zipfile
-                liftIO $ print linksDir
+                liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
-                uploadDicomAsMinc
+                files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+
+                (restExperiment, restDataset) <- uploadDicomAsMincOneGroup
+                    files
                     instrumentFilters
                     experimentFields
                     datasetFields
@@ -198,6 +202,11 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer _)) = do
                     , defaultInstitutionName
                     , defaultInstitutionalDepartmentName
                     , defaultInstitutionalAddress)
+
+                let schemaFile = schemaDicomFile -- FIXME
+
+                zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+                liftIO $ print zipfile'
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"

@@ -15,6 +15,7 @@ import Data.Either
 import Data.Maybe
 import Control.Applicative
 import Control.Lens
+import Control.Exception.Base (catch, IOException(..))
 import Control.Monad
 import Control.Monad.Identity
 import Control.Monad.Reader
@@ -266,6 +267,8 @@ majorOrthancGroups :: IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancI
 majorOrthancGroups = do
     patients <- hmmPatients
 
+    putStrLn $ "majorOrthancGroups: |patients| = " ++ (show $ length patients)
+
     x <- (flip mapM) patients $ \p -> do studies <- flattenResult <$> traverse hmmStudies p
                                          let patientsAndStudies = cp [p] studies
 
@@ -284,43 +287,48 @@ flabert' (Success patient, Success study) = do
     return [(patient, study, s) | s <- catResults series]
 
 flabert'' (patient, study, series) = do
-    oneInstance <- head <$> (mapM getInstance (oseriesInstances series))
-    return $ case oneInstance of Success oneInstance' -> [(patient, study, series, oneInstance')]
-                                 Error e -> []
+    oneInstance <- traverse getInstance (headMay $ oseriesInstances series)
+
+    return $ case oneInstance of
+        (Just (Success oneInstance')) -> [(patient, study, series, oneInstance')]
+        _                             -> [] -- FIXME Would be better to log something here.
 
 flabert''' (patient, study, series, oneInstance) = do
     tags <- getTags (oinstID oneInstance)
     return $ case tags of Success tags' -> [(patient, study, series, oneInstance, tags')]
                           Error e       -> []
 
-
 catResults [] = []
 catResults ((Success x):xs) = x:(catResults xs)
 catResults ((Error _):xs) = catResults xs
 
-getSeriesArchive :: String -> IO (Maybe (FilePath, FilePath))
+getSeriesArchive :: String -> IO (Either String (FilePath, FilePath))
 getSeriesArchive sid = do
     let host = "http://localhost:8042"
+
+    print $ "getSeriesArchive: " ++ sid
 
     r <- getWith defaults (host </> "series" </> sid </> "archive")
 
     case r ^? responseBody of
-        Just body -> do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
-                        let zipfile = tempDir </> (sid ++ ".zip")
-                        BL.writeFile zipfile body
-                        return $ Just (tempDir, zipfile)
-        Nothing   -> return Nothing
+        Just body -> catch (do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
+                               let zipfile = tempDir </> (sid ++ ".zip")
+                               BL.writeFile zipfile body
+                               return $ Right (tempDir, zipfile))
+                           (\e -> return $ Left $ show (e :: IOException))
+        Nothing   -> return $ Left "http error?"
 
 unpackArchive :: FilePath -> FilePath -> IO (Either String FilePath)
-unpackArchive tempDir zipfile = do
-    setCurrentDirectory tempDir -- FIXME catch IO exceptions...
-    unzipResult <- runShellCommand "unzip" ["-q", "-o", zipfile]
+unpackArchive tempDir zipfile = catch
+    (do setCurrentDirectory tempDir
+        unzipResult <- runShellCommand "unzip" ["-q", "-o", zipfile]
 
-    case unzipResult of
-        Left e  -> return $ Left e
-        Right _ -> do dicomFiles <- filter (not . isSuffixOf ".zip") <$> getRecursiveContentsList tempDir
-                      linksDir <- createLinksDirectoryFromList dicomFiles
-                      return $ Right linksDir
+        case unzipResult of
+            Left e  -> return $ Left e
+            Right _ -> do dicomFiles <- filter (not . isSuffixOf ".zip") <$> getRecursiveContentsList tempDir
+                          linksDir <- createLinksDirectoryFromList dicomFiles
+                          return $ Right linksDir)
+    (\e -> return $ Left $ show (e :: IOException))
 
 getOrthancInstrumentGroups
     :: [(String, String)]

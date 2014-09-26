@@ -23,6 +23,7 @@ import System.FilePath
 import System.FilePath.Glob
 import Text.HTML.TagSoup.Entity (lookupEntity)
 import Text.Parsec
+import Control.Exception.Base (catch, IOException(..))
 
 import System.IO.Temp
 import System.Posix.Files
@@ -46,13 +47,11 @@ unescapeEntities ('&':xs) =
     _                -> '&' : unescapeEntities xs
 unescapeEntities (x:xs) = x : unescapeEntities xs
 
-
--- Note on execWriterT/raiseK: http://ocharles.org.uk/blog/posts/2012-12-16-24-days-of-hackage-pipes.html
 getRecursiveContentsList :: FilePath -> IO [FilePath]
 getRecursiveContentsList path = find always (fileType ==? RegularFile) path
 
 dcmDump :: FilePath -> IO (Either String String)
-dcmDump fileName = runShellCommand "dcmdump" ["+Qn", fileName]
+dcmDump f = runShellCommand "dcmdump" ["+Qn", f]
 
 globDcmFiles :: FilePath -> IO [FilePath]
 globDcmFiles path = do
@@ -331,11 +330,10 @@ groupDicomFiles instrumentFilters titleFields datasetFields files = fmap (map sn
 
   where
 
-    -- Only the files that match all of the filters:
-    files' = concatMap maybeToList $ nub $ (map toMaybeIf instrumentFilters) <*> files
+    files' = filter (allTrue instrumentFilters) files
 
-    toMaybeIf :: (a -> Bool) -> a -> Maybe a
-    toMaybeIf f filename = if f filename then Just filename else Nothing
+    allTrue :: [a -> Bool] -> a -> Bool
+    allTrue fs x = and [ f x | f <- fs]
 
     toTuple file = ((titleFields <*> [file], datasetFields <*> [file]), file)
 
@@ -343,8 +341,3 @@ groupDicomFiles instrumentFilters titleFields datasetFields files = fmap (map sn
     sortOn :: Ord b => (a -> b) -> [a] -> [a]
     sortOn f = map snd . sortBy (comparing fst)
                        . map (\x -> let y = f x in y `seq` (y, x))
-
-
-
-
-

@@ -24,6 +24,7 @@ library
                    , Network.Orthanc.API
   -- other-modules:
   -- other-extensions:
+  ghc-options:       -threaded
   build-depends:       base >=4.6 && <4.7
                      , wreq
                      , time
