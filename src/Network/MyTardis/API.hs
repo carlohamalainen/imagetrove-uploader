@@ -151,9 +151,16 @@ getExperimentWithMetadata = getResourceWithMetadata getExperiments restExperimen
 getDatasetWithMetadata :: IdentifiedDataset -> ReaderT MyTardisConfig IO (Either LookupError RestDataset)
 getDatasetWithMetadata = getResourceWithMetadata getDatasets restDatasetToIdentified
 
--- | Given an identified file, find a matching file in MyTARDIS.
+-- | Given an identified file, find a matching file in MyTARDIS. We only look for matching files in the
+-- dataset referred to by the 'IdentifiedFile'.
 getFileWithMetadata :: IdentifiedFile -> ReaderT MyTardisConfig IO (Either LookupError RestDatasetFile)
-getFileWithMetadata = getResourceWithMetadata getDatasetFiles restFileToIdentified
+getFileWithMetadata idf = getResourceWithMetadata (getDatasetFiles $ idfDatasetURL idf) restFileToIdentified idf
+
+-- | Get the files for a particular dataset.
+getDatasetFiles :: URI -> ReaderT MyTardisConfig IO (Result [RestDatasetFile])
+getDatasetFiles uri = do
+    MyTardisConfig _ apiBase _ _ _ <- ask
+    getList $ dropIfPrefix apiBase $ uri ++ "files"
 
 -- | Create an experiment. If an experiment already exists in MyTARDIS that matches our
 -- locally identified experiment, we just return the existing experiment.
@@ -282,8 +289,6 @@ createFileLocation idf@(IdentifiedFile datasetURL filepath md5sum size metadata)
     -- Match on just the base bit of the file, not the whole path.
     let filepath' = takeFileName filepath
 
-    -- FIXME This gets a list of *ALL* dataset files, which could be huge, not
-    -- the list of files in the dataset referred to by datasetURL!
     x <- getFileWithMetadata $ idf {idfFilePath = filepath'}
 
     case x of
@@ -427,9 +432,9 @@ getExperiments = getList "/experiment"
 getDatasets :: ReaderT MyTardisConfig IO (Result [RestDataset])
 getDatasets = getList "/dataset"
 
--- | Retrieve all dataset files.
-getDatasetFiles :: ReaderT MyTardisConfig IO (Result [RestDatasetFile])
-getDatasetFiles = getList "/dataset_file"
+-- | Retrieve all files.
+getAllDatasetFiles :: ReaderT MyTardisConfig IO (Result [RestDatasetFile])
+getAllDatasetFiles = getList "/dataset_file"
 
 -- | Retrieve all replicas.
 getReplicas :: ReaderT MyTardisConfig IO (Result [RestReplica])
