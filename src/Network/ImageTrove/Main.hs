@@ -46,7 +46,6 @@ data UploaderOptions = UploaderOptions
     { optDirectory      :: Maybe FilePath
     , optHost           :: Maybe String
     , optConfigFile     :: FilePath
-    , optProcessedDir   :: Maybe FilePath
     , optCommand        :: Command
     }
     deriving (Eq, Show)
@@ -68,7 +67,6 @@ pUploaderOptions = UploaderOptions
     <$> optional (strOption (long "input-dir"     <> metavar "DIRECTORY" <> help "Directory with DICOM files."))
     <*> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
     <*>          (strOption (long "config"        <> metavar "CONFIG"    <> help "Configuration file."))
-    <*> optional (strOption (long "processed-dir" <> metavar "DIRECTORY" <> help "Directory for processed DICOM files."))
     <*> subparser x
   where
     x    = cmd1 <> cmd2 <> cmd3 <> cmd4
@@ -85,7 +83,7 @@ hashFiles = sha256 . unwords
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
-dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
+dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
     let dir = getDicomDir opts
 
     -- FIXME let user specify glob
@@ -115,10 +113,10 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
                                                                             else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
 
 
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (optProcessedDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"
@@ -128,7 +126,7 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
     A.Success experiments <- getExperiments
     forM_ experiments $ (flip addGroupReadOnlyAccess) project12345
 
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
     let hash = uploadOneHash oneOpts
 
     let dir = getDicomDir opts
@@ -159,7 +157,7 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
                     []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
                     _       -> error "Multiple experiments with the same hash. Oh noes!"
 
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer _)) = do
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
     forM_ instrumentConfigs $ \( instrumentFilters
@@ -195,7 +193,6 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer _)) = do
                     identifyDataset
                     identifyDatasetFile
                     linksDir
-                    "/tmp/p"
                     ( schemaExperiment
                     , schemaDataset
                     , schemaDicomFile

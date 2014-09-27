@@ -82,13 +82,18 @@ postWith' x v = do
     MyTardisConfig host apiBase user pass opts <- ask
     liftIO $ postWith opts (host ++ apiBase ++ x) v
 
+-- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 putWith' x v = do
     MyTardisConfig host apiBase user pass opts <- ask
     liftIO $ putWith opts (host ++ apiBase ++ x) v
 
--- | Create a resource. See 'createExperiment' or similar for how to use.
-createResource :: ToJSON b => String -> (String -> ReaderT MyTardisConfig IO (Result a)) -> b -> ReaderT MyTardisConfig IO (Result a)
+-- | Create a resource. See 'createExperiment' for an example use.
+createResource
+    :: String                                           -- ^ Name of resource used to construct the full URL, e.g. \"/experiment/\"
+    -> (String -> ReaderT MyTardisConfig IO (Result a)) -- ^ Function to retrieve the newly created resource.
+    -> Value                                            -- ^ Metadata, JSON form.
+    -> ReaderT MyTardisConfig IO (Result a)             -- ^ The new resource.
 createResource resourceURL getFn keyValueMap = do
     r <- postWith' resourceURL (toJSON keyValueMap)
 
@@ -99,7 +104,12 @@ createResource resourceURL getFn keyValueMap = do
     case url of Just url' -> getFn $ drop (length host) url'
                 Nothing   -> return $ Error "Failed to fetch newly created resource."
 
-updateResource  :: ToJSON a => a -> (a -> String) -> (String -> ReaderT MyTardisConfig IO (Result a)) -> ReaderT MyTardisConfig IO (Result a)
+-- | Update a resource.
+updateResource :: ToJSON a =>
+       a                                                    -- ^ Resource to update, e.g. 'RestUser'.
+    -> (a -> String)                                        -- ^ Function to get URI from the resource.
+    -> (String -> ReaderT MyTardisConfig IO (Result a))     -- ^ Function to retrieve the updated resource.
+    -> ReaderT MyTardisConfig IO (Result a)                 -- ^ The updated resource.
 updateResource resource getURI getFn = do
     apiBase <- myTardisApiBase <$> ask
 
@@ -119,9 +129,9 @@ data LookupError = NoMatches | TwoOrMoreMatches | OtherError String deriving (Eq
 
 -- | Retrieve a resource. Returns 'Right' if exactly one match is found, otherwise 'Left' and some error information.
 getResourceWithMetadata :: forall a b. (Show a, Show b, Eq b)
-    => ReaderT MyTardisConfig IO (Result [a])
-    -> (a -> ReaderT MyTardisConfig IO b)               -- ^ Function that retrieves the full list of resources, e.g. 'getExperiments'.
-    -> b                                                -- ^ Function that converts a rest value (e.g. 'RestExperiment') to an identified value (e.g. 'IdentifiedExperiment').
+    => ReaderT MyTardisConfig IO (Result [a])   -- ^ Function that retrieves the full list of resources, e.g. 'getExperiments'.
+    -> (a -> ReaderT MyTardisConfig IO b)       -- ^ Convert a resource to its "identified" equivalent, e.g. 'IdentifiedExperiment'.
+    -> b                                        -- ^ The identified value, e.g. 'IdentifiedExperiment'.
     -> ReaderT MyTardisConfig IO (Either LookupError a) -- ^ A uniquely discovered resource, or a lookup error.
 getResourceWithMetadata getFn restToIdentified identifiedObject = do
     objects  <- getFn                                    :: ReaderT MyTardisConfig IO (Result [a])
@@ -160,11 +170,18 @@ createExperiment ie@(IdentifiedExperiment description instutitionName title meta
             [ ("description",       String $ T.pack description)
             , ("institution_name",  String $ T.pack instutitionName)
             , ("title",             String $ T.pack title)
-            , ("parameter_sets",    toJSON $ map metadataToJSON metadata)
+            , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
             , ("objectacls",        toJSON $ ([] :: [RestGroup]))
             ]
 
-createUser :: Maybe String -> Maybe String -> String -> [RestGroup] -> Bool -> ReaderT MyTardisConfig IO (Result RestUser)
+-- | Create a new user in MyTARDIS' Django backend.
+createUser
+    :: Maybe String                                 -- ^ User's first name.
+    -> Maybe String                                 -- ^ User's last name.
+    -> String                                       -- ^ Username.
+    -> [RestGroup]                                  -- ^ Groups that this user is a member of.
+    -> Bool                                         -- ^ Create a Django superuser.
+    -> ReaderT MyTardisConfig IO (Result RestUser)  -- ^ The new user resource.
 createUser firstname lastname username groups isSuperuser = createResource "/user/" getUser m
   where
     m = object
@@ -175,8 +192,21 @@ createUser firstname lastname username groups isSuperuser = createResource "/use
             , ("is_superuser",  toJSON isSuperuser)
             ]
 
-metadataToJSON :: (String, M.Map String String) -> Value
-metadataToJSON (name, mmap) = mkParameterSet name (M.toList mmap)
+-- | Construct a ParameterSet from a basic "String"/"String" map.
+mkParameterSet :: (String, M.Map String String) -- ^ Schema URL and key/value map.
+               -> Value                         -- ^ JSON value.
+mkParameterSet (schemaURL, mmap) = object
+                                        [ ("schema",     String $ T.pack schemaURL)
+                                        , ("parameters", toJSON $ map mkParameter (M.toList mmap))
+                                        ]
+  where
+    mkParameter :: (String, String) -> Value
+    mkParameter (name, value) = object
+                                    [ ("name",  String $ T.pack name)
+                                    , ("value", String $ T.pack value)
+                                    ]
+
+
 
 -- | Create a dataset. If a dataset already exists in MyTARDIS that matches our
 -- locally identified dataset, we just return the existing dataset.
@@ -194,10 +224,14 @@ createDataset ids@(IdentifiedDataset description experiments metadata) = do
             [ ("description",       String $ T.pack description)
             , ("experiments",       toJSON experiments)
             , ("immutable",         toJSON True)
-            , ("parameter_sets",    toJSON $ map metadataToJSON metadata)
+            , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
             ]
 
-createGroup :: String -> ReaderT MyTardisConfig IO (Result RestGroup)
+-- | Create a Django group. We do not set any permissions
+-- here, e.g.  add_logentry, change_logentry, delete_logentry, etc.
+createGroup
+    :: String                                       -- ^ Group name, e.g. \"Project 12345\".
+    -> ReaderT MyTardisConfig IO (Result RestGroup) -- ^ The newly created group.
 createGroup name = createResource "/group/" getGroup x
   where
     x = object
@@ -205,7 +239,14 @@ createGroup name = createResource "/group/" getGroup x
             , ("permissions",   toJSON ([] :: [RestPermission]))
             ]
 
-createExperimentObjectACL :: Bool -> Bool -> Bool -> RestGroup -> RestExperiment -> ReaderT MyTardisConfig IO (Result RestObjectACL)
+-- | Create an ObjectACL for an experiment.
+createExperimentObjectACL
+    :: Bool                                             -- ^ canDelete
+    -> Bool                                             -- ^ canRead
+    -> Bool                                             -- ^ canWrite
+    -> RestGroup                                        -- ^ Group for which the ACL refers to.
+    -> RestExperiment                                   -- ^ Experiment for which the ACL refers to.
+    -> ReaderT MyTardisConfig IO (Result RestObjectACL) -- ^ The new ObjectACL resource.
 createExperimentObjectACL canDelete canRead canWrite group experiment = createResource "/objectacl/" getObjectACL x
   where
     x = object
@@ -215,9 +256,9 @@ createExperimentObjectACL canDelete canRead canWrite group experiment = createRe
             , ("canRead",           toJSON canRead)
             , ("canWrite",          toJSON canWrite)
             , ("entityId",          String $ T.pack $ show $ groupID group)
-            , ("isOwner",             toJSON False)
-            , ("object_id",           toJSON $ eiID experiment)
-            , ("pluginId",            toJSON ("django_group" :: String))
+            , ("isOwner",           toJSON False)
+            , ("object_id",         toJSON $ eiID experiment)
+            , ("pluginId",          toJSON ("django_group" :: String))
             ]
 
 -- | For a local file, calculate its canonical file path, md5sum, and size.
@@ -231,33 +272,38 @@ calcFileMetadata _filepath = do
         Right md5sum' -> Just (filepath, md5sum', size)
         Left _        -> Nothing
 
--- | Create a location for a dataset file in MyTARDIS.
--- This is sort of wrong - it either returns an existing matching file
--- or creates a new one. But in our use case we end up trying to use copyfiletostore and
--- that gives errors like
---      Error "Unknown prefix: 7/10/e4e9e4c4-8d98f872-06c01206-656bc087-a9a33151.zip
--- because the file exists. FIXME
-createFileLocation :: IdentifiedFile -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
+-- | Create a location for a dataset file in MyTARDIS. Fails if a matching file exists in this dataset.
+-- It is our responsibility to copy the supplied location. See "copyFileToStore". Until we do so (and the checksums match)
+-- the related "RestReplica" will have @replicaVerified == False@.
+createFileLocation
+    :: IdentifiedFile                                     -- ^ Identified file.
+    -> ReaderT MyTardisConfig IO (Result RestDatasetFile) -- New dataset file resource.
 createFileLocation idf@(IdentifiedFile datasetURL filepath md5sum size metadata) = do
     -- Match on just the base bit of the file, not the whole path.
     let filepath' = takeFileName filepath
 
+    -- FIXME This gets a list of *ALL* dataset files, which could be huge, not
+    -- the list of files in the dataset referred to by datasetURL!
     x <- getFileWithMetadata $ idf {idfFilePath = filepath'}
 
     case x of
-        Right dsf -> return $ Success dsf
-        Left NoMatches      -> let m = object
+        Right dsf -> return $ Error "Matching file exists. We will not create another."
+        Left NoMatches        -> let m = object
                                         [ ("dataset",           String $ T.pack datasetURL)
                                         , ("filename",          String $ T.pack $ takeFileName filepath)
                                         , ("md5sum",            String $ T.pack md5sum)
                                         , ("size",              toJSON $ size)
-                                        , ("parameter_sets",    toJSON $ map metadataToJSON metadata)
+                                        , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
                                         ] in createResource "/dataset_file/" getDatasetFile m
 
-        Left _              -> return $ Error "Duplicate file detected, will not create another."
+        Left TwoOrMoreMatches -> return $ Error $ "Found two or more matches for this file, will not create another: " ++ filepath
+
+        Left (OtherError e)   -> return $ Error e
+
+type URI = String
 
 -- | Generic function for creating a resource.
-getResource :: forall a. FromJSON a => String -> ReaderT MyTardisConfig IO (Result a)
+getResource :: forall a. FromJSON a => URI -> ReaderT MyTardisConfig IO (Result a)
 getResource uri = do
     MyTardisConfig host _ _ _ opts <- ask
     r <- liftIO $ getWith opts (host ++ uri)
@@ -266,52 +312,41 @@ getResource uri = do
         Just v      -> fromJSON v
         Nothing     -> Error "Could not decode resource."
 
-getParameterName :: String -> ReaderT MyTardisConfig IO (Result RestParameterName)
+getParameterName :: URI -> ReaderT MyTardisConfig IO (Result RestParameterName)
 getParameterName = getResource
 
-getExperimentParameterSet :: String -> ReaderT MyTardisConfig IO (Result RestExperimentParameterSet)
+getExperimentParameterSet :: URI -> ReaderT MyTardisConfig IO (Result RestExperimentParameterSet)
 getExperimentParameterSet = getResource
 
-getExperimentParameter :: String -> ReaderT MyTardisConfig IO (Result RestParameter)
+getExperimentParameter :: URI -> ReaderT MyTardisConfig IO (Result RestParameter)
 getExperimentParameter = getResource
 
-getExperiment :: String -> ReaderT MyTardisConfig IO (Result RestExperiment)
+getExperiment :: URI -> ReaderT MyTardisConfig IO (Result RestExperiment)
 getExperiment = getResource
 
-getSchema :: String -> ReaderT MyTardisConfig IO (Result RestSchema)
+getSchema :: URI -> ReaderT MyTardisConfig IO (Result RestSchema)
 getSchema = getResource
 
-getPermission :: String -> ReaderT MyTardisConfig IO (Result RestPermission)
+getPermission :: URI -> ReaderT MyTardisConfig IO (Result RestPermission)
 getPermission = getResource
 
-getGroup :: String -> ReaderT MyTardisConfig IO (Result RestGroup)
+getGroup :: URI -> ReaderT MyTardisConfig IO (Result RestGroup)
 getGroup = getResource
 
-getObjectACL :: String -> ReaderT MyTardisConfig IO (Result RestObjectACL)
+getObjectACL :: URI -> ReaderT MyTardisConfig IO (Result RestObjectACL)
 getObjectACL = getResource
 
-getUser :: String -> ReaderT MyTardisConfig IO (Result RestUser)
+getUser :: URI -> ReaderT MyTardisConfig IO (Result RestUser)
 getUser = getResource
 
 data MyTardisSchema = SchemaExperiment | SchemaDataset | SchemaDatasetFile | SchemaNone
 
--- These could be instances of something so that the types
--- are constructed properly.
-
-readSchema :: (Eq a, Num a, Show a) => a -> MyTardisSchema
-readSchema 1 = SchemaExperiment
-readSchema 2 = SchemaDataset
-readSchema 3 = SchemaDatasetFile
-readSchema 4 = SchemaNone
-readSchema x = error $ "No MyTARDIS schema associated with " ++ show x
-
-showSchema ::  MyTardisSchema -> Integer
-showSchema SchemaExperiment     = 1
-showSchema SchemaDataset        = 2
-showSchema SchemaDatasetFile    = 3
-showSchema SchemaNone           = 4
-
-createSchema :: String -> String -> MyTardisSchema -> ReaderT MyTardisConfig IO (Result RestSchema)
+-- | Create an experiment, dataset, or file schema. The @namespace@ is the primary key in Django, not the @name@.
+createSchema
+    :: String                                           -- ^ Name, e.g. @DICOM Metadata Experiment@.
+    -> String                                           -- ^ Namespace. Must be a url form, e.g. @http://cai.edu.au/schema/1@.
+    -> MyTardisSchema                                   -- ^ Schema type.
+    -> ReaderT MyTardisConfig IO (Result RestSchema)    -- ^ New schema resource.
 createSchema name namespace stype = do
     createResource "/schema/" getSchema m
   where
@@ -321,10 +356,18 @@ createSchema name namespace stype = do
             , ("type",              Number $ fromIntegral $ showSchema stype)
             ]
 
-getDataset :: String -> ReaderT MyTardisConfig IO (Result RestDataset)
+    showSchema ::  MyTardisSchema -> Integer
+    showSchema SchemaExperiment     = 1
+    showSchema SchemaDataset        = 2
+    showSchema SchemaDatasetFile    = 3
+    showSchema SchemaNone           = 4
+
+-- | Retrieve a dataset.
+getDataset :: URI -> ReaderT MyTardisConfig IO (Result RestDataset)
 getDataset = getResource
 
-getDatasetFile :: String -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
+-- | Retrieve a dataset file.
+getDatasetFile :: URI -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
 getDatasetFile = getResource
 
 getTopLevel :: T.Text -> BL.ByteString -> Maybe Value
@@ -368,58 +411,65 @@ dropIfPrefix prefix s = if prefix `isPrefixOf` s
                             then drop (length prefix) s
                             else s
 
-
+-- | Retrieve all experiment parameter sets.
 getExperimentParameterSets :: ReaderT MyTardisConfig IO (Result [RestExperimentParameterSet])
 getExperimentParameterSets = getList "/experimentparameterset"
 
+-- | Retrieve all experiment parameters.
 getExperimentParameters :: ReaderT MyTardisConfig IO (Result [RestParameter])
 getExperimentParameters = getList "/experimentparameter"
 
+-- | Retrieve all experiments.
 getExperiments :: ReaderT MyTardisConfig IO (Result [RestExperiment])
 getExperiments = getList "/experiment"
 
+-- | Retrieve all datasets.
 getDatasets :: ReaderT MyTardisConfig IO (Result [RestDataset])
 getDatasets = getList "/dataset"
 
+-- | Retrieve all dataset files.
 getDatasetFiles :: ReaderT MyTardisConfig IO (Result [RestDatasetFile])
 getDatasetFiles = getList "/dataset_file"
 
+-- | Retrieve all replicas.
 getReplicas :: ReaderT MyTardisConfig IO (Result [RestReplica])
 getReplicas = getList "/replica"
 
+-- | Retrieve all schemas.
 getSchemas :: ReaderT MyTardisConfig IO (Result [RestSchema])
 getSchemas = getList "/schema"
 
+-- | Retrieve all permissions.
 getPermissions :: ReaderT MyTardisConfig IO (Result [RestPermission])
 getPermissions = getList "/permission"
 
+-- | Retrieve all parameter names.
 getParameterNames :: ReaderT MyTardisConfig IO (Result [RestParameterName])
 getParameterNames = getList "/parametername"
 
+-- | Retrieve all groups.
 getGroups :: ReaderT MyTardisConfig IO (Result [RestGroup])
 getGroups = getList "/group"
 
+-- | Retrieve all users.
 getUsers :: ReaderT MyTardisConfig IO (Result [RestUser])
 getUsers = getList "/user"
 
+-- | Retrieve all ObjectACLs.
 getObjectACLs :: ReaderT MyTardisConfig IO (Result [RestObjectACL])
 getObjectACLs = getList "/objectacl"
 
+-- | Retrieve all replicas that are not verified.
 getUnverifiedReplicas :: ReaderT MyTardisConfig IO (Result [RestReplica])
-getUnverifiedReplicas = fmap (filter (not . replicaVerified)) <$> getReplicas
+getUnverifiedReplicas = fmap (filter $ not . replicaVerified) <$> getReplicas
 
-mkParameter :: (String, String) -> Value
-mkParameter (name, value) = object [ ("name",  String $ T.pack name)
-                                   , ("value", String $ T.pack value)
-                                   ]
-
-mkParameterSet :: String -> [(String, String)] -> Value
-mkParameterSet schema nameValuePairs = object
-    [ ("schema", String $ T.pack schema)
-    , ("parameters", toJSON $ map mkParameter nameValuePairs)
-    ]
-
-copyFileToStore :: FilePath -> RestDatasetFile -> IO ([Result FilePath])
+-- | Copy a file to the MyTARDIS store. Currently this only supports local files - nothing about web locations
+-- (as in the Atom Provider) or an object store. The return value is a list of @Result FilePath@ because a dataset file
+-- in MyTARDIS has a list of replicas. Typically we only use one, but for completeness we have to check all of them.
+copyFileToStore
+    :: FilePath                 -- ^ Path of a local file.
+    -> RestDatasetFile          -- ^ Dataset file (should be unverified) with a valid location.
+    -> IO ([Result FilePath])   -- ^ List of results of attempting to copy @filepath@ to the location in the dataset file resource.
 copyFileToStore filepath dsf = do
     results <- forM (dsfReplicas dsf) $ \r -> do
         let filePrefix = "file://" :: String
@@ -436,16 +486,19 @@ copyFileToStore filepath dsf = do
 
     return results
 
+-- | Delete an experiment.
 deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response ())
 deleteExperiment x = do
     MyTardisConfig host apiBase _ _ opts <- ask
     liftIO $ deleteWith opts $ host ++ eiResourceURI x
 
+-- | Delete a dataset.
 deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response ())
 deleteDataset x = do
     MyTardisConfig host apiBase _ _ opts <- ask
     liftIO $ deleteWith opts $ host ++ dsiResourceURI x
 
+-- | Delete a dataset file.
 deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response ())
 deleteDatasetFile x = do
     MyTardisConfig host apiBase _ _ opts <- ask
@@ -498,7 +551,9 @@ instance GeneralParameterSet RestDatasetFileParameterSet where
     generalGetSchema     = dsfParamSetSchema
 
 -- | Get a parameterset in a handy (schema, dict) form.
-handyParameterSet :: GeneralParameterSet a => a -> ReaderT MyTardisConfig IO (String, M.Map String String)
+handyParameterSet :: GeneralParameterSet a
+    => a  -- An instance of "GeneralParameterSet".
+    -> ReaderT MyTardisConfig IO (String, M.Map String String) -- Schema namespace and key/value map.
 handyParameterSet paramset = do
     m <- (M.fromList . catMaybes) <$> mapM getBoth (generalGetParameters paramset)
     return (schema, m)
@@ -518,7 +573,17 @@ handyParameterSet paramset = do
         case (name, value) of (Success name', Just value') -> return $ Just (name', value')
                               _                            -> return Nothing
 
-getOrCreateUser  :: Maybe String -> Maybe String -> String -> [RestGroup] -> Bool -> ReaderT MyTardisConfig IO (Result RestUser)
+-- Get a user if they already exist (matching on the @username@) otherwise create the user.
+-- If a user already exists and they have @isSuperuser == False@ and we call this function
+-- with @isSuperuser == True@, we will not change them to a superuser. Similarly, calling
+-- this function with changing values for @groups@ will not update the user's group membership.
+getOrCreateUser
+    :: Maybe String     -- ^ User's first name.
+    -> Maybe String     -- ^ User's last name.
+    -> String           -- ^ Username.
+    -> [RestGroup]      -- ^ Rest groups that the user should be a member of.
+    -> Bool             -- ^ Create as a superuser.
+    -> ReaderT MyTardisConfig IO (Result RestUser)
 getOrCreateUser firstname lastname username groups isSuperuser = do
     users <- traverse (filter (((==) username) . ruserUsername)) <$> getUsers
 
@@ -527,19 +592,25 @@ getOrCreateUser firstname lastname username groups isSuperuser = do
         [Success user]  -> return $ Success user
         _               -> return $ Error $ "Duplicate users found with username: " ++ username
 
--- | Get a Group with a given name, or create it if it doesn't already exist. Will fail if
+-- | Get a group with a given name, or create it if it doesn't already exist. Will fail if
 -- a duplicate group name is discovered.
 getOrCreateGroup  :: String -> ReaderT MyTardisConfig IO (Result RestGroup)
 getOrCreateGroup name = do
-    groups <- traverse (filter (((==) name) . groupName)) <$> getGroups
+    groups <- traverse (filter $ ((==) name) . groupName) <$> getGroups
 
     case groups of
         []              -> createGroup name
         [Success group] -> return $ Success group
         _               -> return $ Error $ "Duplicate groups found with name: " ++ name
 
--- | Create an ObjectACL that gives a group read-only access to an experiment.
-getOrCreateExperimentACL  :: Bool -> Bool -> Bool -> RestExperiment -> RestGroup -> ReaderT MyTardisConfig IO (Result RestObjectACL)
+-- | Get or create an ObjectACL that gives a group specified access to an experiment.
+getOrCreateExperimentACL
+    :: Bool                 -- ^ canDelete
+    -> Bool                 -- ^ canRead
+    -> Bool                 -- ^ canWrite
+    -> RestExperiment       -- ^ Experiment.
+    -> RestGroup            -- ^ Group.
+    -> ReaderT MyTardisConfig IO (Result RestObjectACL) -- ^ Updated ObjectACL.
 getOrCreateExperimentACL canDelete canRead canWrite experiment group = do
     acls <- traverse (filter f) <$> getObjectACLs
 
@@ -559,6 +630,7 @@ getOrCreateExperimentACL canDelete canRead canWrite experiment group = do
           && objectObjectID         acl == eiID experiment
           && objectPluginId         acl == "django_group"
 
+-- | Make a user a member of a group.
 addUserToGroup  :: RestUser -> RestGroup -> ReaderT MyTardisConfig IO (Result RestUser)
 addUserToGroup user group = do
     if any ((==) (groupName group)) (map groupName currentGroups)
@@ -567,18 +639,24 @@ addUserToGroup user group = do
   where
     currentGroups = ruserGroups user
 
+-- | Remove a group from a user's membership list.
 removeUserFromGroup  :: RestUser -> RestGroup -> ReaderT MyTardisConfig IO (Result RestUser)
 removeUserFromGroup user group = updateResource user' ruserResourceURI getUser
   where
-    user' = user
-              { ruserGroups = filter ((/=) group) (ruserGroups user)
-              }
+    user' = user { ruserGroups = filter ((/=) group) (ruserGroups user) }
 
--- | Allow a Group to have read-only access to an experiment.
+-- | Allow a group to have read-only access to an experiment.
 addGroupReadOnlyAccess  :: RestExperiment -> RestGroup -> ReaderT MyTardisConfig IO (Result RestExperiment)
 addGroupReadOnlyAccess = addGroupAccess False True False
 
-addGroupAccess  :: Bool -> Bool -> Bool -> RestExperiment -> RestGroup -> ReaderT MyTardisConfig IO (Result RestExperiment)
+-- | Add the specified group access to an experiment.
+addGroupAccess
+    :: Bool                                                 -- ^ canDelete
+    -> Bool                                                 -- ^ canRead
+    -> Bool                                                 -- ^ canWrite
+    -> RestExperiment                                       -- ^ Experiment.
+    -> RestGroup                                            -- ^ Group.
+    -> ReaderT MyTardisConfig IO (Result RestExperiment)    -- ^ Updated experment resource.
 addGroupAccess canDelete canRead canWrite experiment group = do
     acl <- getOrCreateExperimentACL canDelete canRead canWrite experiment group
 
@@ -588,27 +666,6 @@ addGroupAccess canDelete canRead canWrite experiment group = do
     case acl of
         Success acl' -> getExperiment (eiResourceURI experiment)
         Error   e    -> return $ Error e
-
-  where
-
-    -- Avoid adding the ACL if we have one with the same general attributes.
-    addAcl  :: RestObjectACL -> [RestObjectACL] -> [RestObjectACL]
-    addAcl acl acls = if any (aclEq acl) acls
-                            then acls
-                            else acl:acls
-
-    aclEq :: RestObjectACL -> RestObjectACL -> Bool
-    aclEq acl1 acl2 =  eqOn objectAclOwnershipType acl1 acl2
-                    && eqOn objectCanDelete        acl1 acl2
-                    && eqOn objectCanRead          acl1 acl2
-                    && eqOn objectCanWrite         acl1 acl2
-                    && eqOn objectEntityId         acl1 acl2
-                    && eqOn objectIsOwner          acl1 acl2
-                    && eqOn objectObjectID         acl1 acl2
-                    && eqOn objectPluginId         acl1 acl2
-
-    eqOn :: Eq b => (a -> b) -> a -> a -> Bool
-    eqOn f x y = (f x) == (f y)
 
 uploadFileBasic
     :: String
@@ -662,25 +719,34 @@ createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
                                     then return $ Success $ head $ filter ((==) namespace . schemaNamespace) schemas
                                     else createSchema name namespace stype
 
+-- | Convert the DICOM files in a directory to MINC and upload.
+uploadDicomAsMinc
+  :: [DicomFile -> Bool]                    -- ^ Filters to match instrument.
+     -> [DicomFile -> Maybe String]         -- ^ Fields to use in the experiment's title.
+     -> [DicomFile -> Maybe String]         -- ^ Fields to use in the dataset's title.
+     -> (String
+         -> String
+         -> String
+         -> String
+         -> [DicomFile -> Maybe String]
+         -> [DicomFile]
+         -> Maybe IdentifiedExperiment)     -- ^ Identify an experiment.
+     -> (String
+         -> [DicomFile -> Maybe String]
+         -> RestExperiment
+         -> [DicomFile]
+         -> Maybe IdentifiedDataset)        -- ^ Identify a dataset.
+     -> (RestDataset
+         -> String
+         -> String
+         -> Integer
+         -> [(String, M.Map String String)]
+         -> IdentifiedFile)                 -- ^ Identify a file.
+     -> FilePath                            -- ^ Directory containing DICOM files.
+     -> (String, String, String, String, String, String) -- ^ Experiment schema, dataset schema, file schema, default institution name, default department name, default institution address.
+     -> ReaderT MyTardisConfig IO ()
 
--- uploadDicomAsMinc :: ([DicomFile] -> IdentifiedExperiment) -> FilePath -> FilePath -> ReaderT MyTardisConfig IO ()
---uploadDicomAsMinc  :: [DicomFile -> Bool]   -- ^ Filters to match instrument.
---                   -> [DicomFile -> Maybe String] -- ^ Fields to use in the experiment's title.
---                   -> [DicomFile -> Maybe String] -- ^ Fields to use in the dataset's title.
---                   -> (String -> [DicomFile -> Maybe String] -> [DicomFile] -> Maybe IdentifiedExperiment)              -- ^ Identify an experiment.
---                   -> ([DicomFile -> Maybe String] -> RestExperiment -> [DicomFile] -> Maybe IdentifiedDataset)         -- ^ Identify a dataset.
---                   -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile) -- ^ Identify a file.
---                   -> FilePath  -- ^ Source directory.
---                   -> FilePath  -- ^ Processed directory.
---                   -> (String, String, String) -- ^ Schema URIs for experiments, dataset, and files, respectively.
---                   -> ReaderT MyTardisConfig IO ()
-uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
-    -- FIXME Chuck a wobbly if the schemas aren't successfully made/found.
-    -- FIXME Schema names should be configurable - and then we get to deal with name changes etc.
-
-    -- ever get an empty list in files?
-    -- Err, should be passing this list of files in, not doing this here?
-    -- FIXME
+uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
     _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
@@ -689,9 +755,9 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
     liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    forM_ groups $ \files -> uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ groups $ \files -> uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
 
-uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir processedDir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
+uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
 
     schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
  
@@ -749,18 +815,5 @@ uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields
                                         Right thumbnail' -> do dsft <- uploadFileBasic schemaFile identifyDatasetFile d thumbnail' filemetadata
                                                                liftIO $ putStrLn $ "uploadDicomAsMinc: dsft: " ++ show dsft
                                         Left e           -> liftIO $ putStrLn $ "Error while creating thumbnail: " ++ e ++ " for file " ++ f
-
-
-    -- FIXME Need to catch IO exceptions earlier...
-    {-
-    liftIO $ forM_ files $ \f -> do
-        let f' = dicomFilePath f
-
-        copyFile f' (processedDir </> (takeFileName f'))
-        -- FIXME check exceptions
-        -- FIXME check if target exists and make backup instead...
-        liftIO $ putStrLn $ "Removing: " ++ f'
-        removeFile f'
-    -}
 
     return (e, d)
