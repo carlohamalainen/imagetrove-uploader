@@ -28,6 +28,10 @@ import Network.MyTardis.RestTypes
 import Network.MyTardis.Types
 import Network.Orthanc.API
 
+import System.IO
+
+import Control.Concurrent (threadDelay)
+
 data Command
     = CmdUploadAll       UploadAllOptions
     | CmdUploadOne       UploadOneOptions
@@ -170,7 +174,9 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                                , defaultInstitutionName
                                , defaultInstitutionalDepartmentName
                                , defaultInstitutionalAddress) -> do
-            Right ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+            _ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+            liftIO $ print _ogroups
+            let Right ogroups = _ogroups
 
             forM_ ogroups $ \(patient, study, series, oneInstance, tags) -> do
                 Right (tempDir, zipfile) <- liftIO $ getSeriesArchive $ oseriesID series
@@ -220,7 +226,7 @@ imageTroveMain = do
     let host = fromMaybe "http://localhost:8000" $ optHost opts'
         f    = optConfigFile opts'
 
-    mytardisOpts <- getConfig host f
+    mytardisOpts <- getConfig host f Nothing
 
     case mytardisOpts of
         (Just mytardisOpts') -> runReaderT (dostuff opts') mytardisOpts'
@@ -262,9 +268,10 @@ identifyExperiment
     -> [DicomFile]
     -> Maybe IdentifiedExperiment
 identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress titleFields files =
-    let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile) in
+    let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
+        _title = ((\f -> titleFields <*> [f]) <$> oneFile) in
         case title of
-            Nothing -> Nothing
+            Nothing -> error $ show oneFile -- Nothing
             Just title' -> Just $ IdentifiedExperiment
                                     description
                                     institution
@@ -368,17 +375,24 @@ grabMetadata file = map oops $ concatMap f metadata
 
 
 
-getConfig :: String -> FilePath -> IO (Maybe MyTardisConfig)
-getConfig host f = do
+getConfig :: String -> FilePath -> Maybe FilePath -> IO (Maybe MyTardisConfig)
+getConfig host f defaultLogfile = do
     cfg <- load [(Optional f)]
 
-    user <- lookup cfg "user" :: IO (Maybe String)
-    pass <- lookup cfg "pass" :: IO (Maybe String)
+    user    <- lookup cfg "user"    :: IO (Maybe String)
+    pass    <- lookup cfg "pass"    :: IO (Maybe String)
+    logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
+
+    let logfile' = if isNothing logfile then defaultLogfile else logfile
+
+    h <- traverse (\l -> do h <- openFile l AppendMode
+                            hSetBuffering h LineBuffering
+                            return h)
+                  logfile'
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass'
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h
         _                        -> Nothing
-
 
 readInstrumentConfigs
   :: FilePath

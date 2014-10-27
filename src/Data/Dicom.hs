@@ -51,7 +51,7 @@ getRecursiveContentsList :: FilePath -> IO [FilePath]
 getRecursiveContentsList path = find always (fileType ==? RegularFile) path
 
 dcmDump :: FilePath -> IO (Either String String)
-dcmDump f = runShellCommand "dcmdump" ["+Qn", f]
+dcmDump f = runShellCommand "dcmdump" ["+Qn", "+L", "-M", f]
 
 globDcmFiles :: FilePath -> IO [FilePath]
 globDcmFiles path = do
@@ -165,6 +165,8 @@ pReferringPhysicianName      = parseField "(0008,0090) PN"
 pManufacturerModelName       = parseField "(0008,1090) LO"
 pManufacturer                = parseField "(0008,0070) LO"
 
+pSequenceName                = parseField "(0018,0024) SH"
+
 parseSingleMatch :: ParsecT String () Identity String -> String -> Maybe String
 parseSingleMatch p s = case parses of
                             ["(no value available)"] -> Nothing
@@ -214,6 +216,8 @@ fieldToFn "ReferringPhysicianName"  = dicomReferringPhysicianName
 fieldToFn "ManufacturerModelName"   = dicomManufacturerModelName
 fieldToFn "Manufacturer"            = dicomManufacturer
 
+fieldToFn "SequenceName"            = dicomSequenceName
+
 fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Check your configuration file."
 
 tupleToIdentifierFn :: (String, String) -> (DicomFile -> Bool)
@@ -261,6 +265,8 @@ data DicomFile = DicomFile
 
     , dicomManufacturerModelName        :: Maybe String
     , dicomManufacturer                 :: Maybe String
+
+    , dicomSequenceName                 :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -312,6 +318,8 @@ readDicomMetadata fileName = do
 
                                     (parseHere pManufacturerModelName)
                                     (parseHere pManufacturer)
+
+                                    (parseHere pSequenceName)
 
 getDicomFilesInDirectory :: String -> FilePath -> IO [FilePath]
 getDicomFilesInDirectory suffix dir = filter (isLowerSuffix suffix) <$> getFilesInDirectory dir

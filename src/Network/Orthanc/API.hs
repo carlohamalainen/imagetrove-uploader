@@ -56,6 +56,8 @@ import System.IO.Temp
 import Data.Dicom (createLinksDirectoryFromList, getRecursiveContentsList)
 import Network.ImageTrove.Utils (runShellCommand)
 
+opts = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
+
 data OrthancPatient = OrthancPatient
     { opID    :: String
     , opIsStable :: Bool
@@ -155,39 +157,45 @@ instance FromJSON Tag where
     parseJSON _          = mzero
 
 data OrthancTags = OrthancTags
-    { otagManufacturer :: Tag
-    , otagManufacturerModelName :: Tag
-    , otagReferringPhysicianName :: Tag
-    , otagStudyDescription :: Tag
-    , otagSeriesDescription :: Tag
-    , otagPatientName :: Tag
+    { otagManufacturer              :: Maybe Tag
+    , otagManufacturerModelName     :: Maybe Tag
+    , otagReferringPhysicianName    :: Maybe Tag
+    , otagStudyDescription          :: Maybe Tag
+    , otagSeriesDescription         :: Maybe Tag
+    , otagPatientName               :: Maybe Tag
+    , otagInstitutionName           :: Maybe Tag
+    , otagSequenceName              :: Maybe Tag
     }
     deriving (Eq, Show)
 
 tagSelector :: String -> Either String (OrthancTags -> Maybe String)
-tagSelector "Manufacturer"              = Right $ tagValue . otagManufacturer
-tagSelector "ManufacturerModelName"     = Right $ tagValue . otagManufacturerModelName
-tagSelector "ReferringPhysicianName"    = Right $ tagValue . otagReferringPhysicianName
-tagSelector "StudyDescription"          = Right $ tagValue . otagStudyDescription
-tagSelector "SeriesDescription"         = Right $ tagValue . otagSeriesDescription
-tagSelector "PatientName"               = Right $ tagValue . otagPatientName
+tagSelector "Manufacturer"              = Right $ \x -> join $ tagValue <$> otagManufacturer           x
+tagSelector "ManufacturerModelName"     = Right $ \x -> join $ tagValue <$> otagManufacturerModelName  x
+tagSelector "ReferringPhysicianName"    = Right $ \x -> join $ tagValue <$> otagReferringPhysicianName x
+tagSelector "StudyDescription"          = Right $ \x -> join $ tagValue <$> otagStudyDescription       x
+tagSelector "SeriesDescription"         = Right $ \x -> join $ tagValue <$> otagSeriesDescription      x
+tagSelector "PatientName"               = Right $ \x -> join $ tagValue <$> otagPatientName            x
+tagSelector "InstitutionName"           = Right $ \x -> join $ tagValue <$> otagInstitutionName        x
+tagSelector "SequenceName"              = Right $ \x -> join $ tagValue <$> otagSequenceName           x
 tagSelector x = Left $ "Unknown DICOM field: " ++ show x
 
 instance FromJSON OrthancTags where
     parseJSON (Object v) = OrthancTags <$>
-        v .: "0008,0070" <*>
-        v .: "0008,1090" <*>
-        v .: "0008,0090" <*>
-        v .: "0008,1030" <*>
-        v .: "0008,103e" <*>
-        v .: "0010,0010"
+        v .:? "0008,0070" <*>
+        v .:? "0008,1090" <*>
+        v .:? "0008,0090" <*>
+        v .:? "0008,1030" <*>
+        v .:? "0008,103e" <*>
+        v .:? "0010,0010" <*>
+        v .:? "0008,0080" <*>
+        v .:? "0018,0024"
     parseJSON _          = mzero
 
 getPatients :: IO (Result [String])
 getPatients = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "patients")
+    r <- getWith opts (host </> "patients")
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -198,7 +206,7 @@ getPatient :: String -> IO (Result OrthancPatient)
 getPatient oid = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "patients" </> oid)
+    r <- getWith opts (host </> "patients" </> oid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -208,7 +216,7 @@ getStudy :: String -> IO (Result OrthancStudy)
 getStudy sid = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "studies" </> sid)
+    r <- getWith opts (host </> "studies" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -218,7 +226,7 @@ getSeries :: String -> IO (Result OrthancSeries)
 getSeries sid = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "series" </> sid)
+    r <- getWith opts (host </> "series" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -228,7 +236,7 @@ getInstance :: String -> IO (Result OrthancInstance)
 getInstance iid = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "instances" </> iid)
+    r <- getWith opts (host </> "instances" </> iid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -238,7 +246,7 @@ getTags :: String -> IO (Result OrthancTags)
 getTags iid = do
     let host = "http://localhost:8042"
 
-    r <- getWith defaults (host </> "instances" </> iid </> "tags")
+    r <- getWith opts (host </> "instances" </> iid </> "tags")
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -291,12 +299,12 @@ flabert'' (patient, study, series) = do
 
     return $ case oneInstance of
         (Just (Success oneInstance')) -> [(patient, study, series, oneInstance')]
-        _                             -> [] -- FIXME Would be better to log something here.
+        _                             -> error "err1" -- [] -- FIXME Would be better to log something here.
 
 flabert''' (patient, study, series, oneInstance) = do
     tags <- getTags (oinstID oneInstance)
     return $ case tags of Success tags' -> [(patient, study, series, oneInstance, tags')]
-                          Error e       -> []
+                          Error e       -> error e
 
 catResults [] = []
 catResults ((Success x):xs) = x:(catResults xs)
@@ -308,7 +316,7 @@ getSeriesArchive sid = do
 
     print $ "getSeriesArchive: " ++ sid
 
-    r <- getWith defaults (host </> "series" </> sid </> "archive")
+    r <- getWith opts (host </> "series" </> sid </> "archive")
 
     case r ^? responseBody of
         Just body -> catch (do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
