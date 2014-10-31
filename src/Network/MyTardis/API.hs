@@ -246,7 +246,14 @@ mkParameterSet (schemaURL, mmap) = object
                                     , ("value", String $ T.pack value)
                                     ]
 
-
+mkSharedLocation :: FilePath -> [(FilePath, String)] -> [Value]
+mkSharedLocation prefix x = map f x
+  where
+    f (fname, locname) = object
+                            [ ("url",       String $ T.pack $ prefix </> fname)
+                            , ("location",  String $ T.pack locname)
+                            , ("protocol",  String $ T.pack "file")
+                            ]
 
 -- | Create a dataset. If a dataset already exists in MyTARDIS that matches our
 -- locally identified dataset, we just return the existing dataset.
@@ -332,9 +339,10 @@ calcFileMetadata _filepath = do
 -- It is our responsibility to copy the supplied location. See "copyFileToStore". Until we do so (and the checksums match)
 -- the related "RestReplica" will have @replicaVerified == False@.
 createFileLocation
-    :: IdentifiedFile                                     -- ^ Identified file.
+    :: Integer                                            -- ^ ID of parent dataset.
+    -> IdentifiedFile                                     -- ^ Identified file.
     -> ReaderT MyTardisConfig IO (Result RestDatasetFile) -- New dataset file resource.
-createFileLocation idf@(IdentifiedFile datasetURL filepath md5sum size metadata) = do
+createFileLocation datasetID idf@(IdentifiedFile datasetURL filepath md5sum size metadata) = do
 
     -- Match on just the base bit of the file, not the whole path.
     let filepath' = takeFileName filepath
@@ -353,6 +361,7 @@ createFileLocation idf@(IdentifiedFile datasetURL filepath md5sum size metadata)
                                         , ("md5sum",            String $ T.pack md5sum)
                                         , ("size",              toJSON $ size)
                                         , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
+                                        , ("replicas",          toJSON $ mkSharedLocation (show datasetID) [(takeFileName filepath, "imagetrove")]) -- FIXME hardcoded Location name
                                         ] in do writeLog "No matches, creating resource."
                                                 createResource "/dataset_file/" getDatasetFile m
 
@@ -544,20 +553,18 @@ copyFileToStore filepath dsf = do
     results <- forM (dsfReplicas dsf) $ \r -> do
         let filePrefix = "file://" :: String
             target = replicaURL r
-
         writeLog $ "copyFileToStore: replica: " ++ show r
 
-        if (not $ isPrefixOf filePrefix target)
-            then do writeLog $ "copyFileToStore: unknown prefix: " ++ target
-                    return $ Error $ "Unknown prefix: " ++ target
-            else
-                if (not $ replicaVerified r)
-                    then do let targetFilePath = drop (length filePrefix) target
-                            writeLog $ "copyFileToStore: found unverified target: " ++ targetFilePath
-                            liftIO $ catch (copyFile filepath targetFilePath >> return (Success targetFilePath))
-                                           (\e -> return $ Error $ show (e :: IOException))
-                    else do writeLog $ "copyFileToStore: replica already verified."
-                            return $ Success filepath
+        if (not $ replicaVerified r)
+            then do let targetFilePath = "/imagetrove" </> target -- FIXME hardcoded path
+                        targetDir      = dropFileName targetFilePath
+                    writeLog $ "copyFileToStore: found unverified target: " ++ targetFilePath
+                    liftIO $ catch (do createDirectoryIfMissing True targetDir
+                                       copyFile filepath targetFilePath
+                                       return (Success targetFilePath))
+                                   (\e -> return $ Error $ show (e :: IOException))
+            else do writeLog $ "copyFileToStore: replica already verified."
+                    return $ Success filepath
 
     return results
 
@@ -774,7 +781,7 @@ uploadFileBasic schemaFile identifyDatasetFile d f m = do
     -- This would be tidier if we worked in the Success monad?
     case meta of
         Just  (filepath, md5sum, size) -> do let idf = identifyDatasetFile d filepath md5sum size m
-                                             dsf <- createFileLocation idf
+                                             dsf <- createFileLocation (dsiID d) idf
 
                                              case dsf of Success dsf' -> do results <- copyFileToStore f dsf'
                                                                             case allSuccesses results of
