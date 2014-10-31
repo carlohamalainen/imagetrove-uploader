@@ -8,5 +8,4 @@ cabal-dev
 .hsenv
 .cabal-sandbox/
 cabal.sandbox.config
-cabal.config
 ghcid/*

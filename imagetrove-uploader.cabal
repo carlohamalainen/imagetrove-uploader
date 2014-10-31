@@ -26,7 +26,7 @@ library
   -- other-extensions:
   ghc-options:       -threaded
   build-depends:       base >=4.6 && <4.7
-                     , wreq
+                     , wreq < 0.2.0.0
                      , time
                      , convertible
                      , unix
@@ -43,13 +43,11 @@ library
                      , bytestring
                      , mime-types
                      , http-client
-                     , lens
+                     , lens < 4.4
                      , process-streaming <= 0.3.0.0
                      , pipes-bytestring
                      , optparse-applicative
                      , mtl
-                     , wreq
-                     , lens
                      , bytestring
                      , cryptohash
                      , parsec
@@ -80,7 +78,7 @@ executable imagetrove-uploader
   ghc-options:       -threaded
 
   build-depends:       base >=4.6 && <4.7
-                     , wreq
+                     , wreq < 0.2.0.0
                      , time
                      , convertible
                      , unix
@@ -97,13 +95,11 @@ executable imagetrove-uploader
                      , bytestring
                      , mime-types
                      , http-client
-                     , lens
+                     , lens < 4.4
                      , process-streaming <= 0.3.0.0
                      , pipes-bytestring
                      , optparse-applicative
                      , mtl
-                     , wreq
-                     , lens
                      , bytestring
                      , cryptohash
                      , parsec
