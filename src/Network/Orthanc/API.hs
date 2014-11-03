@@ -209,7 +209,11 @@ getPatient oid = do
     r <- getWith opts (host </> "patients" </> oid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
+        Just v      -> let p = fromJSON v in
+                         case opIsStable <$> p of
+                            Success True    -> p
+                            Success False   -> Error $ "Patient " ++ oid ++ " is not stable in Orthanc."
+                            Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
 getStudy :: String -> IO (Result OrthancStudy)
@@ -219,7 +223,11 @@ getStudy sid = do
     r <- getWith opts (host </> "studies" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
+        Just v      -> let s = fromJSON v in
+                         case ostudyIsStable <$> s of
+                            Success True    -> s
+                            Success False   -> Error $ "Study " ++ sid ++ " is not stable in Orthanc."
+                            Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
 getSeries :: String -> IO (Result OrthancSeries)
@@ -229,7 +237,11 @@ getSeries sid = do
     r <- getWith opts (host </> "series" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
+        Just v      -> let s = fromJSON v in
+                         case oseriesIsStable <$> s of
+                            Success True    -> s
+                            Success False   -> Error $ "Series " ++ sid ++ " is not stable in Orthanc."
+                            Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
 getInstance :: String -> IO (Result OrthancInstance)
