@@ -32,6 +32,8 @@ import System.IO
 
 import Control.Concurrent (threadDelay)
 
+import System.Unix.Directory (removeRecursiveSafely)
+
 data Command
     = CmdUploadAll       UploadAllOptions
     | CmdUploadOne       UploadOneOptions
@@ -183,8 +185,6 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
 
                 liftIO $ print (tempDir, zipfile)
 
-                -- FIXME Tidy up links and temp dir.
-
                 Right linksDir <- liftIO $ unpackArchive tempDir zipfile
                 liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
@@ -209,6 +209,17 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                 let schemaFile = schemaDicomFile -- FIXME
 
                 zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+
+                case zipfile' of
+                    A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
+                                                         putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                         removeRecursiveSafely tempDir
+                                                         putStrLn $ "Deleting links directory: " ++ linksDir
+                                                         removeRecursiveSafely linksDir
+                    A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
+                                                         putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                         putStrLn $ "Not deleting links directory: " ++ linksDir
+
                 liftIO $ print zipfile'
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.

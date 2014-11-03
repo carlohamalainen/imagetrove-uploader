@@ -59,6 +59,8 @@ import Network.MyTardis.RestTypes
 
 import System.IO
 
+import System.Unix.Directory (removeRecursiveSafely)
+
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
     MyTardisConfig _ _ _ _ _ logfile <- ask
@@ -920,12 +922,27 @@ uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields
 
     return (e, d)
 
+data FinalResult = BothOK
+                 | MincFileError String
+                 | ThumbnailError String
+                 deriving (Eq, Show)
 
+anyCatastrohpicErrors :: [(FinalResult, a, b)] -> Bool
+anyCatastrohpicErrors []                            = False
+anyCatastrohpicErrors ((MincFileError _, _, _):_)   = True
+anyCatastrohpicErrors (_:fs)                        = anyCatastrohpicErrors fs
 
-finaliseMincFiles schemaFile identifyDatasetFile d filemetadata mincFiles = do
+finaliseMincFiles
+    :: String   -- ^ Schema URL for files.
+    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile) -- ^ Identify a dataset.
+    -> RestDataset  -- ^ Dataset that we are adding the file to.
+    -> [(String, M.Map String String)] -- ^ File metadata map.
+    -> (FilePath, [FilePath])           -- ^ Temporary directory containing MINC files; list of MINC files in that directory.
+    -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile))]
+finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFiles) = do
     toMinc2Results <- liftIO $ forM mincFiles mncToMnc2 -- FIXME check results
 
-    forM mincFiles $ \f -> do
+    stuff <- forM mincFiles $ \f -> do
         liftIO $ putStrLn $ "uploadDicomAsMinc: minc file f: " ++ show f
         dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
         liftIO $ putStrLn $ "uploadDicomAsMinc: dsf: " ++ show dsf
@@ -933,11 +950,22 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata mincFiles = do
         thumbnail <- liftIO $ createMincThumbnail f
         liftIO $ putStrLn $ "uploadDicomAsMinc: thumbnail: " ++ show thumbnail
 
-        t <- case thumbnail of
-            Right thumbnail' -> do dsft <- uploadFileBasic schemaFile identifyDatasetFile d thumbnail' filemetadata
-                                   liftIO $ putStrLn $ "uploadDicomAsMinc: dsft: " ++ show dsft
-                                   return $ Success thumbnail'
-            Left e           -> do liftIO $ putStrLn $ "Error while creating thumbnail: " ++ e ++ " for file " ++ f
-                                   return $ Error e
+        dsft <- traverse (\thm -> uploadFileBasic schemaFile identifyDatasetFile d thm filemetadata) thumbnail
 
-        return (dsf, t)
+        case (dsf, dsft) of
+            (Error e, _)                          -> do liftIO $ putStrLn $ "Error while uploading file: " ++ e
+                                                        liftIO $ putStrLn $ "See also the directory: " ++ tempDir
+                                                        return (MincFileError e, dsf, dsft)
+            (Success dsf', Right (Success dsft')) -> do liftIO $ putStrLn $ "Successfully uploaded file: " ++ f
+                                                        liftIO $ putStrLn $ "Successfully uploaded thumbnail: " ++ show thumbnail
+                                                        return (BothOK, dsf, dsft)
+            (Success dsf', Right (Error e))       -> do liftIO $ putStrLn $ "FIXME2"
+                                                        return (ThumbnailError e, dsf, dsft)
+            (Success dsf', Left e)                -> do liftIO $ putStrLn $ "FIXME3"
+                                                        return (ThumbnailError e, dsf, dsft)
+
+    if anyCatastrohpicErrors stuff
+        then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
+        else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
+                         removeRecursiveSafely tempDir
+    return stuff

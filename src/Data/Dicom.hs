@@ -79,7 +79,7 @@ createLinksDirectoryFromList dicomFiles = do
 
     return tempDir
 
-dicomToMinc :: [FilePath] -> IO (Either String [FilePath])
+dicomToMinc :: [FilePath] -> IO (Either String (FilePath, [FilePath]))
 dicomToMinc dicomFiles = do
     dicomDir' <- createLinksDirectoryFromList dicomFiles
     outputDir <- createTempDirectory "/tmp" "dcm2mnc"
@@ -88,7 +88,7 @@ dicomToMinc dicomFiles = do
 
     removeRecursiveSafely dicomDir'
 
-    case result of Right result' -> Right <$> getRecursiveContentsList outputDir
+    case result of Right result' -> (Right . ((,) outputDir)) <$> getRecursiveContentsList outputDir
                    Left e        -> return $ Left e
 
 mncToMnc2 :: FilePath -> IO (Either String FilePath)
