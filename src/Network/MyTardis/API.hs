@@ -562,8 +562,15 @@ copyFileToStore filepath dsf = do
                         targetDir      = dropFileName targetFilePath
                     writeLog $ "copyFileToStore: found unverified target: " ++ targetFilePath
                     liftIO $ catch (do createDirectoryIfMissing True targetDir
-                                       copyFile filepath targetFilePath
-                                       return (Success targetFilePath))
+
+                                       -- Paranoia - make sure we don't overwrite something.
+                                       exists <- doesFileExist targetFilePath
+
+                                       if exists
+                                            then return $ Error $ "File already exists: " ++ targetFilePath
+                                            else do copyFile filepath targetFilePath
+                                                    return (Success targetFilePath))
+
                                    (\e -> return $ Error $ show (e :: IOException))
             else do writeLog $ "copyFileToStore: replica already verified."
                     return $ Success filepath
