@@ -161,7 +161,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
 
     case matches of [match] -> liftIO $ print match
                     []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
-                    _       -> error "Multiple experiments with the same hash. Oh noes!"
+                    _       -> error "Multiple experiments with the same hash. This is a bug."
 
 dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
@@ -282,7 +282,7 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
     let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
         _title = ((\f -> titleFields <*> [f]) <$> oneFile) in
         case title of
-            Nothing -> error $ show oneFile -- Nothing
+            Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
             Just title' -> Just $ IdentifiedExperiment
                                     description
                                     institution
@@ -419,7 +419,7 @@ readInstrumentConfigs f = do
     instruments <- lookup cfg "instruments" :: IO (Maybe [String])
 
     case instruments of
-        Nothing -> error $ "No instruments specified in configuration file " ++ f
+        Nothing -> error $ "No instruments specified in configuration file: " ++ f
         Just instruments' -> mapM (readInstrumentConfig cfg) (map T.pack instruments')
 
 readInstrumentConfig
@@ -470,16 +470,16 @@ readInstrumentConfig cfg instrumentName = do
          , defaultInstitutionalAddress
          ) of
         (Just instrumentFields', Just instrumentFieldsT', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress') -> return (instrumentFields', instrumentFieldsT', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress')
-        _ -> error "Unhandled case."
+        _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
   where
 
     toIdentifierFn :: [String] -> (DicomFile -> Bool)
     toIdentifierFn [field, value] = tupleToIdentifierFn (field, value)
-    toIdentifierFn x = error $ "Too many items specified: " ++ show x
+    toIdentifierFn x = error $ "Error: toIdentifierFn: too many items specified: " ++ show x
 
     toIdentifierTuple :: [String] -> (String, String)
     toIdentifierTuple [field, value] = (field, value)
-    toIdentifierTuple x = error $ "Too many items specified: " ++ show x
+    toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
 
 

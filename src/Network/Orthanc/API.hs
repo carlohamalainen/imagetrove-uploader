@@ -264,59 +264,63 @@ getTags iid = do
         Just v      -> fromJSON v
         Nothing     -> Error "Could not decode resource."
 
-hmmStudies :: OrthancPatient -> IO [Result OrthancStudy]
-hmmStudies patient = mapM getStudy $ opStudies patient
+getPatientsStudies :: OrthancPatient -> IO [Result OrthancStudy]
+getPatientsStudies patient = mapM getStudy $ opStudies patient
 
-hmmSeries :: OrthancStudy -> IO [Result OrthancSeries]
-hmmSeries study = mapM getSeries $ ostudySeries study
+getStudysSeries :: OrthancStudy -> IO [Result OrthancSeries]
+getStudysSeries study = mapM getSeries $ ostudySeries study
 
-hmmPatients :: IO [Result OrthancPatient]
-hmmPatients = flattenResult <$> join (traverse (mapM getPatient) <$> getPatients)
+getAllPatients :: IO [Result OrthancPatient]
+getAllPatients = flattenResult <$> join (traverse (mapM getPatient) <$> getPatients)
 
 flattenResult :: Result [Result a] -> [Result a]
 flattenResult (Success x) = x
 flattenResult (Error _) = []
 
-cp :: [a] -> [b] -> [(a, b)]
-cp variables values = do
+crossProduct :: [a] -> [b] -> [(a, b)]
+crossProduct variables values = do
     as <- subsequences variables
     bs <- forM as $ const values
     zip as bs
 
 majorOrthancGroups :: IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
 majorOrthancGroups = do
-    patients <- hmmPatients
+    patients <- getAllPatients
 
     putStrLn $ "majorOrthancGroups: |patients| = " ++ (show $ length patients)
 
-    x <- (flip mapM) patients $ \p -> do studies <- flattenResult <$> traverse hmmStudies p
-                                         let patientsAndStudies = cp [p] studies
+    x <- (flip mapM) patients $ \p -> do studies <- flattenResult <$> traverse getPatientsStudies p
+                                         let patientsAndStudies = crossProduct [p] studies
 
-                                         series <- concat <$> mapM flabert' patientsAndStudies
+                                         series <- concat <$> mapM extendWithSeries patientsAndStudies
 
-                                         patientStudySeriesInstance <- concat <$> mapM flabert'' series
+                                         patientStudySeriesInstance <- concat <$> mapM extendWithOneInstance series
 
-                                         patientStudySeriesInstanceTags <- concat <$> mapM flabert''' patientStudySeriesInstance
+                                         patientStudySeriesInstanceTags <- concat <$> mapM extendWithTags patientStudySeriesInstance
 
                                          return patientStudySeriesInstanceTags
 
     return $ concat x
 
-flabert' (Success patient, Success study) = do
+extendWithSeries (Success patient, Success study) = do
     series <- mapM getSeries (ostudySeries study)
     return [(patient, study, s) | s <- catResults series]
 
-flabert'' (patient, study, series) = do
+extendWithOneInstance (patient, study, series) = do
     oneInstance <- traverse getInstance (headMay $ oseriesInstances series)
 
-    return $ case oneInstance of
-        (Just (Success oneInstance')) -> [(patient, study, series, oneInstance')]
-        _                             -> error "err1" -- [] -- FIXME Would be better to log something here.
+    case oneInstance of
+        (Just (Success oneInstance')) -> return [(patient, study, series, oneInstance')]
+        (Just (Error e))              -> do putStrLn $ "Error while retrieving single instance: " ++ e
+                                            return []
+        (Nothing)                     -> do putStrLn $ "Warning: got Nothing when trying to retrieve single instance."
+                                            return []
 
-flabert''' (patient, study, series, oneInstance) = do
+extendWithTags (patient, study, series, oneInstance) = do
     tags <- getTags (oinstID oneInstance)
-    return $ case tags of Success tags' -> [(patient, study, series, oneInstance, tags')]
-                          Error e       -> error e
+    case tags of Success tags' -> return [(patient, study, series, oneInstance, tags')]
+                 Error e       -> do putStrLn $ "Warning: could not retrieve tags for instance: " ++ e
+                                     return []
 
 catResults [] = []
 catResults ((Success x):xs) = x:(catResults xs)
@@ -336,7 +340,7 @@ getSeriesArchive sid = do
                                BL.writeFile zipfile body
                                return $ Right (tempDir, zipfile))
                            (\e -> return $ Left $ show (e :: IOException))
-        Nothing   -> return $ Left "http error?"
+        Nothing   -> return $ Left "Error: empty response body in getSeriesArchive."
 
 unpackArchive :: FilePath -> FilePath -> IO (Either String FilePath)
 unpackArchive tempDir zipfile = catch

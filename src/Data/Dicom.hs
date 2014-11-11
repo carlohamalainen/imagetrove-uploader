@@ -99,7 +99,7 @@ mncToMnc2 filePath = do
 
     case result of Right _ -> do renameFile tmpFile filePath
                                  return $ Right filePath
-                   Left e  -> error e -- return $ Left e
+                   Left e  -> return $ Left e
 
 createMincThumbnail :: FilePath -> IO (Either String FilePath)
 createMincThumbnail mncFile = do
@@ -218,7 +218,7 @@ fieldToFn "Manufacturer"            = dicomManufacturer
 
 fieldToFn "SequenceName"            = dicomSequenceName
 
-fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Check your configuration file."
+fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Please report this."
 
 tupleToIdentifierFn :: (String, String) -> (DicomFile -> Bool)
 tupleToIdentifierFn (field, value) = \d -> (fieldToFn field) d == Just value
