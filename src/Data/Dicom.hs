@@ -27,7 +27,6 @@ import Control.Exception.Base (catch, IOException(..))
 
 import System.IO.Temp
 import System.Posix.Files
-import System.FilePath
 import System.Process
 import System.Exit (ExitCode(..))
 
@@ -74,7 +73,7 @@ createLinksDirectoryFromList dicomFiles = do
         sourceName <- canonicalizePath f
         let target = tempDir </> (takeFileName f ++ ".dcm")
 
-        print $ ("createLinksDirectoryFromList", sourceName, target)
+        -- print $ ("createLinksDirectoryFromList", sourceName, target)
         createSymbolicLink sourceName target
 
     return tempDir
@@ -88,7 +87,7 @@ dicomToMinc dicomFiles = do
 
     removeRecursiveSafely dicomDir'
 
-    case result of Right result' -> (Right . ((,) outputDir)) <$> getRecursiveContentsList outputDir
+    case result of Right result' -> (Right . (,) outputDir) <$> getRecursiveContentsList outputDir
                    Left e        -> return $ Left e
 
 mncToMnc2 :: FilePath -> IO (Either String FilePath)
@@ -220,8 +219,10 @@ fieldToFn "SequenceName"            = dicomSequenceName
 
 fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Please report this."
 
-tupleToIdentifierFn :: (String, String) -> (DicomFile -> Bool)
-tupleToIdentifierFn (field, value) = \d -> (fieldToFn field) d == Just value
+tupleToIdentifierFn :: (String, String) -> DicomFile -> Bool
+tupleToIdentifierFn (field, value) d = fn d == Just value
+  where
+    fn = fieldToFn field
 
 data DicomFile = DicomFile
     { dicomFilePath                   :: FilePath
@@ -334,7 +335,7 @@ groupDicomFiles :: [DicomFile -> Bool]
                 -> [DicomFile -> Maybe String]
                 -> [DicomFile -> Maybe String]
                 -> [DicomFile] -> [[DicomFile]]
-groupDicomFiles instrumentFilters titleFields datasetFields files = fmap (map snd) $ groupBy ((==) `on` fst) (sortOn fst $ map toTuple files')
+groupDicomFiles instrumentFilters titleFields datasetFields files = map snd <$> groupBy ((==) `on` fst) (sortOn fst $ map toTuple files')
 
   where
 

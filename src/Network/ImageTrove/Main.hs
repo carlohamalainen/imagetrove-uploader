@@ -130,7 +130,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
     cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
 
     A.Success experiments <- getExperiments
-    forM_ experiments $ (flip addGroupReadOnlyAccess) project12345
+    forM_ experiments $ flip addGroupReadOnlyAccess project12345
 
 dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
     let hash = uploadOneHash oneOpts
@@ -144,7 +144,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    let groups = concat $ (flip map) instrumentConfigs $ \( instrumentFilters
+    let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
                                , instrumentFiltersT
                                , experimentFields
                                , datasetFields
@@ -190,7 +190,8 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
 
                 files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-                (restExperiment, restDataset) <- uploadDicomAsMincOneGroup
+                -- (restExperiment, restDataset) <- uploadDicomAsMincOneGroup
+                oneGroupResult <- uploadDicomAsMincOneGroup
                     files
                     instrumentFilters
                     experimentFields
@@ -208,19 +209,24 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
 
                 let schemaFile = schemaDicomFile -- FIXME
 
-                zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+                case oneGroupResult of
+                    (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
+                            zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
 
-                case zipfile' of
-                    A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
-                                                         putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                         removeRecursiveSafely tempDir
-                                                         putStrLn $ "Deleting links directory: " ++ linksDir
-                                                         removeRecursiveSafely linksDir
-                    A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                         putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                         putStrLn $ "Not deleting links directory: " ++ linksDir
+                            case zipfile' of
+                                A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
+                                                                     putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                     removeRecursiveSafely tempDir
+                                                                     putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                     removeRecursiveSafely linksDir
+                                A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
+                                                                     putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                                     putStrLn $ "Not deleting links directory: " ++ linksDir
 
-                liftIO $ print zipfile'
+                            liftIO $ print zipfile'
+                    (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
+                    (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
+                    (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"
@@ -228,7 +234,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
     cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
 
     A.Success experiments <- getExperiments
-    forM_ experiments $ (flip addGroupReadOnlyAccess) project12345
+    forM_ experiments $ flip addGroupReadOnlyAccess project12345
 
 imageTroveMain :: IO ()
 imageTroveMain = do
@@ -309,7 +315,7 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
             ]
 
 allJust :: [Maybe a] -> Maybe [a]
-allJust x = if and (map isJust x) then Just (catMaybes x) else Nothing
+allJust x = if all isJust x then Just (catMaybes x) else Nothing
 
 identifyDataset :: String -> [DicomFile -> Maybe String] -> RestExperiment -> [DicomFile] -> Maybe IdentifiedDataset
 identifyDataset schemaDataset datasetFields re files = let description = join (allJust <$> (\f -> datasetFields <*> [f]) <$> oneFile) in
@@ -388,7 +394,7 @@ grabMetadata file = map oops $ concatMap f metadata
 
 getConfig :: String -> FilePath -> Maybe FilePath -> IO (Maybe MyTardisConfig)
 getConfig host f defaultLogfile = do
-    cfg <- load [(Optional f)]
+    cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
@@ -414,13 +420,13 @@ readInstrumentConfigs
             [DicomFile -> Maybe String],
             String, String, String, String, String, String)]
 readInstrumentConfigs f = do
-    cfg <- load [(Required f)]
+    cfg <- load [Required f]
 
     instruments <- lookup cfg "instruments" :: IO (Maybe [String])
 
     case instruments of
         Nothing -> error $ "No instruments specified in configuration file: " ++ f
-        Just instruments' -> mapM (readInstrumentConfig cfg) (map T.pack instruments')
+        Just instruments' -> mapM (readInstrumentConfig cfg . T.pack) instruments'
 
 readInstrumentConfig
   :: Config
@@ -432,10 +438,10 @@ readInstrumentConfig
              [DicomFile -> Maybe String],
              String, String, String, String, String, String)
 readInstrumentConfig cfg instrumentName = do
-    instrumentFields <- (liftM $ map toIdentifierFn) <$> lookup cfg (instrumentName `T.append` ".instrument")
-    instrumentFieldsT<- (liftM $ map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
-    experimentFields <- (liftM $ map fieldToFn)      <$> lookup cfg (instrumentName `T.append` ".experiment_title")
-    datasetFields    <- (liftM $ map fieldToFn)      <$> lookup cfg (instrumentName `T.append` ".dataset_title")
+    instrumentFields <- liftM (map toIdentifierFn)    <$> lookup cfg (instrumentName `T.append` ".instrument")
+    instrumentFieldsT<- liftM (map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
+    experimentFields <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".experiment_title")
+    datasetFields    <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".dataset_title")
 
     schemaExperiment <- lookup cfg (instrumentName `T.append` ".schema_experiment")
     schemaDataset    <- lookup cfg (instrumentName `T.append` ".schema_dataset")
@@ -445,18 +451,18 @@ readInstrumentConfig cfg instrumentName = do
     defaultInstitutionalDepartmentName  <- lookup cfg (instrumentName `T.append` ".default_institutional_department_name")
     defaultInstitutionalAddress         <- lookup cfg (instrumentName `T.append` ".default_institutional_address")
 
-    when (isNothing instrumentFields) $ error $ "Bad/missing 'instrument' field for "       ++ (T.unpack instrumentName)
-    when (isNothing instrumentFieldsT)$ error $ "Bad/missing 'instrument' field for "       ++ (T.unpack instrumentName)
-    when (isNothing experimentFields) $ error $ "Bad/missing 'experiment_title' field for " ++ (T.unpack instrumentName)
-    when (isNothing datasetFields)    $ error $ "Bad/missing 'dataset_title' field for "    ++ (T.unpack instrumentName)
+    when (isNothing instrumentFields) $ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
+    when (isNothing instrumentFieldsT)$ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
+    when (isNothing experimentFields) $ error $ "Bad/missing 'experiment_title' field for " ++ T.unpack instrumentName
+    when (isNothing datasetFields)    $ error $ "Bad/missing 'dataset_title' field for "    ++ T.unpack instrumentName
 
-    when (isNothing schemaExperiment) $ error $ "Bad/missing 'schema_experiment' field for " ++ (T.unpack instrumentName)
-    when (isNothing schemaDataset)    $ error $ "Bad/missing 'schema_dataset' field for "    ++ (T.unpack instrumentName)
-    when (isNothing schemaFile)       $ error $ "Bad/missing 'schema_file' field for "       ++ (T.unpack instrumentName)
+    when (isNothing schemaExperiment) $ error $ "Bad/missing 'schema_experiment' field for " ++ T.unpack instrumentName
+    when (isNothing schemaDataset)    $ error $ "Bad/missing 'schema_dataset' field for "    ++ T.unpack instrumentName
+    when (isNothing schemaFile)       $ error $ "Bad/missing 'schema_file' field for "       ++ T.unpack instrumentName
 
-    when (isNothing defaultInstitutionName)              $ error $ "Bad/missing 'default_institution_name"              ++ (T.unpack instrumentName)
-    when (isNothing defaultInstitutionalDepartmentName)  $ error $ "Bad/missing 'default_institutional_department_name" ++ (T.unpack instrumentName)
-    when (isNothing defaultInstitutionalAddress)         $ error $ "Bad/missing 'default_institutional_address"         ++ (T.unpack instrumentName)
+    when (isNothing defaultInstitutionName)              $ error $ "Bad/missing 'default_institution_name"              ++ T.unpack instrumentName
+    when (isNothing defaultInstitutionalDepartmentName)  $ error $ "Bad/missing 'default_institutional_department_name" ++ T.unpack instrumentName
+    when (isNothing defaultInstitutionalAddress)         $ error $ "Bad/missing 'default_institutional_address"         ++ T.unpack instrumentName
 
     case ( instrumentFields
          , instrumentFieldsT
@@ -474,7 +480,7 @@ readInstrumentConfig cfg instrumentName = do
 
   where
 
-    toIdentifierFn :: [String] -> (DicomFile -> Bool)
+    toIdentifierFn :: [String] -> DicomFile -> Bool
     toIdentifierFn [field, value] = tupleToIdentifierFn (field, value)
     toIdentifierFn x = error $ "Error: toIdentifierFn: too many items specified: " ++ show x
 

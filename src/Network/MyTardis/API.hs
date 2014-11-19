@@ -2,31 +2,14 @@
 
 module Network.MyTardis.API where
 
-import Control.Applicative ((<$>))
-import Control.Lens
-import Control.Monad (join, forM_, when, liftM)
-
-import Control.Monad.Reader
-import Control.Monad.Identity
 import Control.Monad.Trans (liftIO)
-
-import Data.Aeson (Result(..))
 import Data.Either
-import Data.Maybe
 import Control.Applicative
 import Control.Exception.Base (catch, IOException(..))
 import Control.Lens
 import Control.Monad
 import Control.Monad.Identity
 import Control.Monad.Reader
-import Data.Maybe
-import Network.Wreq
-import Safe
-import System.Directory
-import System.FilePath
-import System.Posix.Files
-
-import qualified Data.Map as M
 
 import Data.Aeson
 import Data.Aeson.Types
@@ -64,7 +47,7 @@ import System.Unix.Directory (removeRecursiveSafely)
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
     MyTardisConfig _ _ _ _ _ logfile <- ask
-    liftIO $ traverse (\h -> hPutStrLn h msg) logfile
+    liftIO $ traverse (`hPutStrLn` msg) logfile
     return ()
 
 data MyTardisConfig = MyTardisConfig
@@ -159,7 +142,7 @@ getResourceWithMetadata getFn restToIdentified identifiedObject = do
     objects  <- getFn                                    :: ReaderT MyTardisConfig IO (Result [a])
     objects' <- traverse (mapM restToIdentified) objects :: ReaderT MyTardisConfig IO (Result [b])
 
-    let filtered = filter ((==) identifiedObject . snd) <$> (liftM2 zip) objects objects'
+    let filtered = filter ((==) identifiedObject . snd) <$> liftM2 zip objects objects'
 
     writeLog $ "getResourceWithMetadata: |objects|: " ++ show (length <$> objects)
     writeLog $ "getResourceWithMetadata: |objects'|: " ++ show (length <$> objects')
@@ -468,22 +451,25 @@ getList url = do
 
     let objects = join $ getObjects <$> body
 
-        next   = case (fmap emNext) <$> (fromJSON <$> (join $ getMeta <$> body)) of
+        next   = case fmap emNext <$> (fromJSON <$> join (getMeta <$> body)) of
                     (Just (Success (Just nextURL))) -> Just $ dropIfPrefix apiBase nextURL
                     _                               -> Nothing
 
     let this = maybeToResult $ fromJSON <$> objects :: Result [a]
 
     case next of Just next' -> do rest <- getList next'
-                                  return $ (liftM2 (++)) this rest
+                                  return $ liftM2 (++) this rest
                  Nothing    -> return this
 
-  where
+-- This is almost asum from Data.Foldable?
+maybeToResult :: Maybe (Result t) -> Result t
+maybeToResult (Just x) = x
+maybeToResult Nothing  = Error "Nothing"
 
-    -- This is almost asum from Data.Foldable?
-    maybeToResult :: Maybe (Result t) -> Result t
-    maybeToResult (Just x) = x
-    maybeToResult Nothing  = Error "Nothing"
+resultMaybeToResult :: Result (Maybe t) -> Result t
+resultMaybeToResult (Success (Just x)) = Success x
+resultMaybeToResult (Success Nothing) = Error "Nothing"
+resultMaybeToResult (Error e) = Error e
 
 dropIfPrefix :: String -> String -> String
 dropIfPrefix prefix s = if prefix `isPrefixOf` s
@@ -548,7 +534,7 @@ getUnverifiedReplicas = fmap (filter $ not . replicaVerified) <$> getReplicas
 copyFileToStore
     :: FilePath                 -- ^ Path of a local file.
     -> RestDatasetFile          -- ^ Dataset file (should be unverified) with a valid location.
-    -> ReaderT MyTardisConfig IO ([Result FilePath])   -- ^ List of results of attempting to copy @filepath@ to the location in the dataset file resource.
+    -> ReaderT MyTardisConfig IO [Result FilePath]   -- ^ List of results of attempting to copy @filepath@ to the location in the dataset file resource.
 copyFileToStore filepath dsf = do
     writeLog $ "copyFileToStore: " ++ show (filepath, dsf)
 
@@ -680,7 +666,7 @@ getOrCreateUser
     -> ReaderT MyTardisConfig IO (Result RestUser)
 getOrCreateUser firstname lastname username groups isSuperuser = do
     writeLog $ "getOrCreateUser: " ++ show (firstname, lastname, username, groups, isSuperuser)
-    users <- traverse (filter (((==) username) . ruserUsername)) <$> getUsers
+    users <- traverse (filter ((username ==) . ruserUsername)) <$> getUsers
 
     case users of
         []              -> do writeLog $ "getOrCreateUser: no user found, creating new user resource."
@@ -695,7 +681,7 @@ getOrCreateUser firstname lastname username groups isSuperuser = do
 getOrCreateGroup  :: String -> ReaderT MyTardisConfig IO (Result RestGroup)
 getOrCreateGroup name = do
     writeLog $ "getOrCreateGroup: " ++ name
-    groups <- traverse (filter $ ((==) name) . groupName) <$> getGroups
+    groups <- traverse (filter $ (==) name . groupName) <$> getGroups
 
     case groups of
         []              -> createGroup name
@@ -738,7 +724,7 @@ addUserToGroup  :: RestUser -> RestGroup -> ReaderT MyTardisConfig IO (Result Re
 addUserToGroup user group = do
     writeLog $ "addUserToGroup: " ++ show (user, group)
 
-    if any ((==) (groupName group)) (map groupName currentGroups)
+    if groupName group `elem` map groupName currentGroups
         then return $ Success user
         else updateResource (user { ruserGroups = group:currentGroups }) ruserResourceURI getUser
   where
@@ -750,7 +736,7 @@ removeUserFromGroup user group = do
     writeLog $ "removeUserFromGroup: " ++ show (user, group)
     updateResource user' ruserResourceURI getUser
   where
-    user' = user { ruserGroups = filter ((/=) group) (ruserGroups user) }
+    user' = user { ruserGroups = filter (group /=) (ruserGroups user) }
 
 -- | Allow a group to have read-only access to an experiment.
 addGroupReadOnlyAccess  :: RestExperiment -> RestGroup -> ReaderT MyTardisConfig IO (Result RestExperiment)
@@ -804,14 +790,19 @@ uploadFileBasic schemaFile identifyDatasetFile d f m = do
                                              return $ Error $ "Failed to calculate checksum for " ++ f
 
 allSuccesses :: [Result a] -> Result String
-allSuccesses []               = Success "All Success or empty list."
-allSuccesses ((Success _):xs) = allSuccesses xs
-allSuccesses ((Error e):_)    = Error e
+allSuccesses []              = Success "All Success or empty list."
+allSuccesses (Success _:xs) = allSuccesses xs
+allSuccesses (Error e:_)    = Error e
 
 allRights :: [Either a b] -> Either a String
-allRights []               = Right "All Right or empty list."
-allRights ((Right _):xs) = allRights xs
-allRights ((Left e):_)    = Left e
+allRights []           = Right "All Right or empty list."
+allRights (Right _:xs) = allRights xs
+allRights (Left e:_)   = Left e
+
+squashResults :: Result (Result t) -> Result t
+squashResults (Success (Success x)) = Success x
+squashResults (Success (Error e))   = Error $ "Error in inner Result: " ++ e
+squashResults (Error e) = Error e
 
 createSchemasIfMissing :: (String, String, String) -> ReaderT MyTardisConfig IO (Result (RestSchema, RestSchema, RestSchema))
 createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
@@ -879,55 +870,61 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
     liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    forM_ groups $ \files -> uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+                                liftIO $ putStrLn $ " uploadDicomAsMinc: result from uploadDicomAsMincOneGroup: " ++ show result
 
 uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
     writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress))
 
     schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
  
-    -- FIXME Just doing some defaults at the moment, dangerously
-    -- assuming Success at each step.
-    Success users <- getUsers
-    let admin = head $ filter ((==) "admin" . ruserUsername) users -- FIXME assumes account exists...
-    Success adminGroup <- getOrCreateGroup "admin"
-    addUserToGroup admin adminGroup
-    liftIO $ putStrLn $ "uploadDicomAsMinc: set admin group."
+    -- Success users <- getUsers
+    -- let admin = head $ filter ((==) "admin" . ruserUsername) users -- FIXME assumes account exists...
+    -- Success adminGroup <- getOrCreateGroup "admin"
+    -- addUserToGroup admin adminGroup
+    -- liftIO $ putStrLn $ "uploadDicomAsMinc: set admin group."
 
-    let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment
-                                                                            schemaExperiment
-                                                                            defaultInstitutionName
-                                                                            defaultInstitutionalDepartmentName
-                                                                            defaultInstitutionalAddress
-                                                                            experimentFields
-                                                                            files
+    --let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment
+    --                                                                        schemaExperiment
+    --                                                                        defaultInstitutionName
+    --                                                                        defaultInstitutionalDepartmentName
+    --                                                                        defaultInstitutionalAddress
+    --                                                                        experimentFields
+    --                                                                        files
 
-    Success e <- createExperiment ie -- FIXME pattern
-    liftIO $ putStrLn $ "uploadDicomAsMinc: " ++ show e
-    addGroupReadOnlyAccess e adminGroup
+    let ie = identifyExperiment
+                schemaExperiment
+                defaultInstitutionName
+                defaultInstitutionalDepartmentName
+                defaultInstitutionalAddress
+                experimentFields
+                files
+
+    e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
+
+    let ids = resultMaybeToResult ((\e -> identifyDataset schemaDataset datasetFields e files) <$> e) :: Result IdentifiedDataset
+
+    d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
+
+    let oneFile = headMay files
+        filemetadata = (\f -> [(schemaFile, M.fromList
+                                                [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
+                                                , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
+                                                , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
+                                                , ("StudyDescription",  fromMaybe "(StudyDescription missing)"  $ dicomStudyDescription  f)
+                                                ]
+                               )
+                              ]) <$> oneFile
  
-    -- FIXME Just pattern...
-    liftIO $ print $ show $ head files
-    let Just ids@(IdentifiedDataset desc experiments metadata) = identifyDataset schemaDataset datasetFields e files
-
-    Success d <- createDataset ids -- FIXME
-    liftIO $ putStrLn $ "uploadDicomAsMinc: " ++ show d
-
-    let oneFile = head files -- FIXME unsafe
-        filemetadata = [(schemaFile, M.fromList
-                                            [ ("PatientID",          fromMaybe "(PatientID missing)"   $ dicomPatientID         oneFile)
-                                            , ("StudyInstanceUID",   fromMaybe "(StudyInstanceUID missing)"    $ dicomStudyInstanceUID  oneFile)
-                                            , ("SeriesInstanceUID",  fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID oneFile)
-                                            , ("StudyDescription",  fromMaybe "(StudyDescription missing)" $ dicomStudyDescription oneFile)
-                                            ]
-                        )
-                       ]
-
-    -- Now pack the dicom files as Minc
+    -- Pack the dicom files as Minc
     dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
-    traverse (finaliseMincFiles schemaFile identifyDatasetFile d filemetadata) dicom
 
-    return (e, d)
+    case (e, d, filemetadata) of
+        (Success e', Success d', Just filemetadata') -> do traverse (finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata') dicom
+                                                           return $ Success (e, d)
+        (Error expError, _, _)                       -> do return $ Error $ "Error when creating experiment: " ++ expError
+        (Success _, Error dsError, _)                -> do return $ Error $ "Error when creating dataset: " ++ dsError
+        (Success _, Success _, Nothing)              -> do return $ Error $ "Error when creating extracting file metadata. No files in DICOM group!"
 
 data FinalResult = BothOK
                  | MincFileError String

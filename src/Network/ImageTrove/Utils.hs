@@ -3,21 +3,15 @@ module Network.ImageTrove.Utils where
 import Control.Applicative ((<$>))
 import Control.Monad (liftM)
 
-import Data.Either ()
-import System.Process
-import System.Process.Streaming
-
 import qualified Pipes.ByteString as B
 
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.ByteString.Internal (w2c)
+import Data.ByteString.Internal (c2w, w2c)
 
 import Crypto.Hash.SHA1 (hashlazy)
-import Data.ByteString.Internal (c2w)
 import Text.Printf (printf)
 
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString as Strict
 
 import Data.Either ()

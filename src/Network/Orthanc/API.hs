@@ -2,53 +2,35 @@
 
 module Network.Orthanc.API where
 
-import Control.Applicative ((<$>))
-import Control.Lens
-import Control.Monad (join, forM_, when, liftM)
-
-import Control.Monad.Reader
-import Control.Monad.Identity
 import Control.Monad.Trans (liftIO)
 
-import Data.Aeson (Result(..))
-import Data.Either
-import Data.Maybe
+import Data.Either()
 import Control.Applicative
 import Control.Lens
-import Control.Exception.Base (catch, IOException(..))
+import Control.Exception.Base (catch, IOException)
 import Control.Monad
-import Control.Monad.Identity
-import Control.Monad.Reader
-import Data.Maybe
-import Network.Wreq
-import Safe
-import System.Directory
-import System.FilePath
-import System.Posix.Files
-
-import qualified Data.Map as M
+import Control.Monad.Identity()
+import Control.Monad.Reader()
 
 import Data.Aeson
-import Data.Aeson.Types
-import Data.List (isPrefixOf, isSuffixOf, subsequences)
-import Data.Maybe
+import Data.Aeson.Types()
+import Data.List (isSuffixOf, subsequences)
+import Data.Maybe()
 import Data.Traversable (traverse)
 import Network.HTTP.Client (defaultManagerSettings, managerResponseTimeout)
-import Network.Mime
+import Network.Mime()
 import Network.Wreq
 
 import Safe
 
-import Network.MyTardis.Instances
+import Network.MyTardis.Instances()
 
 import System.Directory
 import System.FilePath
-import System.Posix.Files
+import System.Posix.Files()
 
 import qualified Data.ByteString.Lazy   as BL
-import qualified Data.ByteString.Char8  as B8
 
-import qualified Data.Text as T
 import qualified Data.Map as M
 
 import System.IO.Temp
@@ -56,6 +38,7 @@ import System.IO.Temp
 import Data.Dicom (createLinksDirectoryFromList, getRecursiveContentsList)
 import Network.ImageTrove.Utils (runShellCommand)
 
+opts :: Options
 opts = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
 
 data OrthancPatient = OrthancPatient
@@ -287,18 +270,17 @@ majorOrthancGroups :: IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancI
 majorOrthancGroups = do
     patients <- getAllPatients
 
-    putStrLn $ "majorOrthancGroups: |patients| = " ++ (show $ length patients)
+    putStrLn $ "majorOrthancGroups: |patients| = " ++ show (length patients)
 
-    x <- (flip mapM) patients $ \p -> do studies <- flattenResult <$> traverse getPatientsStudies p
-                                         let patientsAndStudies = crossProduct [p] studies
+    x <- forM patients $ \p -> do studies <- flattenResult <$> traverse getPatientsStudies p
+                                  let patientsAndStudies = crossProduct [p] studies
 
-                                         series <- concat <$> mapM extendWithSeries patientsAndStudies
+                                  series <- concat <$> mapM extendWithSeries patientsAndStudies
 
-                                         patientStudySeriesInstance <- concat <$> mapM extendWithOneInstance series
+                                  patientStudySeriesInstance <- concat <$> mapM extendWithOneInstance series
 
-                                         patientStudySeriesInstanceTags <- concat <$> mapM extendWithTags patientStudySeriesInstance
-
-                                         return patientStudySeriesInstanceTags
+                                  -- patient, study, series, instance, tags
+                                  concat <$> mapM extendWithTags patientStudySeriesInstance
 
     return $ concat x
 
@@ -313,7 +295,7 @@ extendWithOneInstance (patient, study, series) = do
         (Just (Success oneInstance')) -> return [(patient, study, series, oneInstance')]
         (Just (Error e))              -> do putStrLn $ "Error while retrieving single instance: " ++ e
                                             return []
-        (Nothing)                     -> do putStrLn $ "Warning: got Nothing when trying to retrieve single instance."
+        (Nothing)                     -> do putStrLn $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
                                             return []
 
 extendWithTags (patient, study, series, oneInstance) = do
@@ -323,8 +305,8 @@ extendWithTags (patient, study, series, oneInstance) = do
                                      return []
 
 catResults [] = []
-catResults ((Success x):xs) = x:(catResults xs)
-catResults ((Error _):xs) = catResults xs
+catResults (Success x:xs) = x : catResults xs
+catResults (Error _:xs) = catResults xs
 
 getSeriesArchive :: String -> IO (Either String (FilePath, FilePath))
 getSeriesArchive sid = do
@@ -372,10 +354,10 @@ getOrthancInstrumentGroups instrumentIdentifiers orthancData =
     mkSelector (fieldName, expectedValue) = case tagSelector fieldName of Right fn -> Right $ \tags -> fn tags == Just expectedValue
                                                                           Left e   -> Left e
 
-    allRights []             = True
-    allRights ((Right _):rs) = allRights rs
-    allRights ((Left _):_)   = False
+    allRights []           = True
+    allRights (Right _:rs) = allRights rs
+    allRights (Left _:_)   = False
 
-    getRights []             = []
-    getRights ((Right r):rs) = r:(getRights rs)
-    getRights ((Left _):rs)  = getRights rs
+    getRights []           = []
+    getRights (Right r:rs) = r : getRights rs
+    getRights (Left _:rs)  = getRights rs
