@@ -34,6 +34,7 @@ import qualified Data.ByteString.Char8  as B8
 import qualified Data.Text as T
 import Text.Printf (printf)
 import qualified Data.Map as M
+import qualified Data.MultiMap as MM
 
 import Data.Dicom
 import Network.ImageTrove.Utils (computeChecksum)
@@ -218,11 +219,11 @@ createUser firstname lastname username groups isSuperuser = do
             ]
 
 -- | Construct a ParameterSet from a basic "String"/"String" map.
-mkParameterSet :: (String, M.Map String String) -- ^ Schema URL and key/value map.
-               -> Value                         -- ^ JSON value.
+mkParameterSet :: (String, MM.MultiMap String String) -- ^ Schema URL and key/value map.
+               -> Value                               -- ^ JSON value.
 mkParameterSet (schemaURL, mmap) = object
                                         [ ("schema",     String $ T.pack schemaURL)
-                                        , ("parameters", toJSON $ map mkParameter (M.toList mmap))
+                                        , ("parameters", toJSON $ map mkParameter (MM.toList mmap))
                                         ]
   where
     mkParameter :: (String, String) -> Value
@@ -633,9 +634,9 @@ instance GeneralParameterSet RestDatasetFileParameterSet where
 -- | Get a parameterset in a handy (schema, dict) form.
 handyParameterSet :: GeneralParameterSet a
     => a  -- An instance of "GeneralParameterSet".
-    -> ReaderT MyTardisConfig IO (String, M.Map String String) -- Schema namespace and key/value map.
+    -> ReaderT MyTardisConfig IO (String, MM.MultiMap String String) -- Schema namespace and key/value map.
 handyParameterSet paramset = do
-    m <- (M.fromList . catMaybes) <$> mapM getBoth (generalGetParameters paramset)
+    m <- (MM.fromList . catMaybes) <$> mapM getBoth (generalGetParameters paramset)
     return (schema, m)
 
   where
@@ -764,10 +765,10 @@ addGroupAccess canDelete canRead canWrite experiment group = do
 
 uploadFileBasic
     :: String
-    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile)
+    -> (RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile)
     -> RestDataset
     -> FilePath
-    -> [(String, M.Map String String)]
+    -> [(String, MM.MultiMap String String)]
     -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
 uploadFileBasic schemaFile identifyDatasetFile d f m = do
     writeLog $ "uploadFileBasic: " ++ show (schemaFile, d, f, m)
@@ -843,6 +844,7 @@ uploadDicomAsMinc
          -> String
          -> String
          -> String
+         -> [String]
          -> [DicomFile -> Maybe String]
          -> [DicomFile]
          -> Maybe IdentifiedExperiment)     -- ^ Identify an experiment.
@@ -855,13 +857,13 @@ uploadDicomAsMinc
          -> String
          -> String
          -> Integer
-         -> [(String, M.Map String String)]
+         -> [(String, MM.MultiMap String String)]
          -> IdentifiedFile)                 -- ^ Identify a file.
      -> FilePath                            -- ^ Directory containing DICOM files.
-     -> (String, String, String, String, String, String) -- ^ Experiment schema, dataset schema, file schema, default institution name, default department name, default institution address.
+     -> (String, String, String, String, String, String, [String]) -- ^ Experiment schema, dataset schema, file schema, default institution name, default department name, default institution address, default operators.
      -> ReaderT MyTardisConfig IO ()
 
-uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
+uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
     _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
@@ -870,33 +872,20 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
     liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
                                 liftIO $ putStrLn $ " uploadDicomAsMinc: result from uploadDicomAsMincOneGroup: " ++ show result
 
-uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) = do
-    writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress))
+uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
+    writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators))
 
     schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
  
-    -- Success users <- getUsers
-    -- let admin = head $ filter ((==) "admin" . ruserUsername) users -- FIXME assumes account exists...
-    -- Success adminGroup <- getOrCreateGroup "admin"
-    -- addUserToGroup admin adminGroup
-    -- liftIO $ putStrLn $ "uploadDicomAsMinc: set admin group."
-
-    --let Just ie@(IdentifiedExperiment desc institution title metadata) = identifyExperiment
-    --                                                                        schemaExperiment
-    --                                                                        defaultInstitutionName
-    --                                                                        defaultInstitutionalDepartmentName
-    --                                                                        defaultInstitutionalAddress
-    --                                                                        experimentFields
-    --                                                                        files
-
     let ie = identifyExperiment
                 schemaExperiment
                 defaultInstitutionName
                 defaultInstitutionalDepartmentName
                 defaultInstitutionalAddress
+                defaultOperators
                 experimentFields
                 files
 
@@ -907,7 +896,7 @@ uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields
     d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
 
     let oneFile = headMay files
-        filemetadata = (\f -> [(schemaFile, M.fromList
+        filemetadata = (\f -> [(schemaFile, MM.fromList
                                                 [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
                                                 , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
                                                 , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
@@ -938,9 +927,9 @@ anyCatastrohpicErrors (_:fs)                        = anyCatastrohpicErrors fs
 
 finaliseMincFiles
     :: String   -- ^ Schema URL for files.
-    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile) -- ^ Identify a dataset.
+    -> (RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile) -- ^ Identify a dataset.
     -> RestDataset  -- ^ Dataset that we are adding the file to.
-    -> [(String, M.Map String String)] -- ^ File metadata map.
+    -> [(String, MM.MultiMap String String)] -- ^ File metadata map.
     -> (FilePath, [FilePath])           -- ^ Temporary directory containing MINC files; list of MINC files in that directory.
     -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile))]
 finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFiles) = do

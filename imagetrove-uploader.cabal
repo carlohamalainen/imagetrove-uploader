@@ -70,6 +70,7 @@ library
                      , text
                      , csv
                      , email-validate
+                     , multimap
 
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -125,6 +126,7 @@ executable imagetrove-uploader
                      , imagetrove-uploader
                      , csv
                      , email-validate
+                     , multimap
 
 executable update-aaf-acl
   main-is:           Aaf.hs
@@ -176,5 +178,6 @@ executable update-aaf-acl
                      , imagetrove-uploader
                      , csv
                      , email-validate
+                     , multimap
 
   default-language:    Haskell2010

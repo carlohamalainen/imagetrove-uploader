@@ -15,6 +15,7 @@ import qualified Data.Foldable as DF
 import Data.Maybe
 import Data.List (intercalate)
 import qualified Data.Map as M
+import qualified Data.MultiMap as MM
 import qualified Data.Aeson as A
 import qualified Data.Text as T
 import Options.Applicative
@@ -108,10 +109,11 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
                                , schemaDicomFile
                                , defaultInstitutionName
                                , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress) -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
+                               , defaultInstitutionalAddress
+                               , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
                                                                     forM_ groups $ \files -> do
                                                                         let
-                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress experimentFields files
+                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields files
                                                                             hash = (sha256 . unwords) (map dicomFilePath files)
 
                                                                         liftIO $ if showFileSets cmdShow
@@ -122,7 +124,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
 dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress)
+    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"
@@ -153,7 +155,8 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
                                , schemaDicomFile
                                , defaultInstitutionName
                                , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
+                               , defaultInstitutionalAddress
+                               , defaultOperators) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
 
     let
         hashes = map (hashFiles . fmap dicomFilePath) groups :: [String]
@@ -175,7 +178,8 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                                , schemaDicomFile
                                , defaultInstitutionName
                                , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress) -> do
+                               , defaultInstitutionalAddress
+                               , defaultOperators) -> do
             _ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
             liftIO $ print _ogroups
             let Right ogroups = _ogroups
@@ -205,7 +209,8 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                     , schemaDicomFile
                     , defaultInstitutionName
                     , defaultInstitutionalDepartmentName
-                    , defaultInstitutionalAddress)
+                    , defaultInstitutionalAddress
+                    , defaultOperators)
 
                 let schemaFile = schemaDicomFile -- FIXME
 
@@ -281,10 +286,11 @@ identifyExperiment
     -> String
     -> String
     -> String
+    -> [String]
     -> [DicomFile -> Maybe String]
     -> [DicomFile]
     -> Maybe IdentifiedExperiment
-identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress titleFields files =
+identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators titleFields files =
     let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
         _title = ((\f -> titleFields <*> [f]) <$> oneFile) in
         case title of
@@ -308,11 +314,14 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
     institutionalDepartmentName = defaultInstitutionalDepartmentName -- FIXME fromMaybe defaultInstitutionalDepartmentName $ join $ dicomInstitutionName    <$> oneFile
     institutionAddress          = fromMaybe defaultInstitutionalAddress        $ join $ dicomInstitutionAddress <$> oneFile
 
-    m = M.fromList
-            [ ("InstitutionName",             institution)
-            , ("InstitutionalDepartmentName", institutionalDepartmentName)
-            , ("InstitutionAddress",          institutionAddress)
-            ]
+    m = MM.fromList $ m1 ++ m2
+
+    m1 = [ ("InstitutionName",             institution)
+         , ("InstitutionalDepartmentName", institutionalDepartmentName)
+         , ("InstitutionAddress",          institutionAddress)
+         ]
+
+    m2 = map (\o -> ("Operator", o)) defaultOperators
 
 allJust :: [Maybe a] -> Maybe [a]
 allJust x = if all isJust x then Just (catMaybes x) else Nothing
@@ -330,9 +339,9 @@ identifyDataset schemaDataset datasetFields re files = let description = join (a
 
     experiments = [eiResourceURI re]
 
-    m           = M.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
+    m           = MM.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
 
-identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile
+identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile
 identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
                                         (dsiResourceURI rds)
                                         filepath
@@ -418,7 +427,7 @@ readInstrumentConfigs
             [(String, String)],
             [DicomFile -> Maybe String],
             [DicomFile -> Maybe String],
-            String, String, String, String, String, String)]
+            String, String, String, String, String, String, [String])]
 readInstrumentConfigs f = do
     cfg <- load [Required f]
 
@@ -436,7 +445,7 @@ readInstrumentConfig
              [(String, String)],
              [DicomFile -> Maybe String],
              [DicomFile -> Maybe String],
-             String, String, String, String, String, String)
+             String, String, String, String, String, String, [String])
 readInstrumentConfig cfg instrumentName = do
     instrumentFields <- liftM (map toIdentifierFn)    <$> lookup cfg (instrumentName `T.append` ".instrument")
     instrumentFieldsT<- liftM (map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
@@ -451,6 +460,8 @@ readInstrumentConfig cfg instrumentName = do
     defaultInstitutionalDepartmentName  <- lookup cfg (instrumentName `T.append` ".default_institutional_department_name")
     defaultInstitutionalAddress         <- lookup cfg (instrumentName `T.append` ".default_institutional_address")
 
+    defaultOperators                    <- lookup cfg (instrumentName `T.append` ".default_operators")
+
     when (isNothing instrumentFields) $ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
     when (isNothing instrumentFieldsT)$ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
     when (isNothing experimentFields) $ error $ "Bad/missing 'experiment_title' field for " ++ T.unpack instrumentName
@@ -464,6 +475,8 @@ readInstrumentConfig cfg instrumentName = do
     when (isNothing defaultInstitutionalDepartmentName)  $ error $ "Bad/missing 'default_institutional_department_name" ++ T.unpack instrumentName
     when (isNothing defaultInstitutionalAddress)         $ error $ "Bad/missing 'default_institutional_address"         ++ T.unpack instrumentName
 
+    when (isNothing defaultOperators)                    $ error $ "Bad/missing 'default_operators"                     ++ T.unpack instrumentName
+
     case ( instrumentFields
          , instrumentFieldsT
          , experimentFields
@@ -474,8 +487,9 @@ readInstrumentConfig cfg instrumentName = do
          , defaultInstitutionName
          , defaultInstitutionalDepartmentName
          , defaultInstitutionalAddress
+         , defaultOperators
          ) of
-        (Just instrumentFields', Just instrumentFieldsT', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress') -> return (instrumentFields', instrumentFieldsT', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress')
+        (Just instrumentFields', Just instrumentFieldsT', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (instrumentFields', instrumentFieldsT', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
   where
