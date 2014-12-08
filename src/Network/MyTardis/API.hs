@@ -957,8 +957,14 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFi
             (Success dsf', Left e)                -> do liftIO $ putStrLn $ "FIXME3"
                                                         return (ThumbnailError e, dsf, dsft)
 
-    if anyCatastrohpicErrors stuff
-        then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
-        else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
-                         removeRecursiveSafely tempDir
+    -- Can get here if the experiment already exists and the file exists, so should delete the 
+    -- temporary files regardless. Maybe add a debug mode to leave them behind?
+    --if anyCatastrohpicErrors stuff
+    --    then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
+    --    else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
+    --                     removeRecursiveSafely tempDir
+
+    liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
+                removeRecursiveSafely tempDir
+
     return stuff
