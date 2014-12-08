@@ -20,7 +20,10 @@ data IdentifiedExperiment = IdentifiedExperiment
     , ideTitle              :: String   -- ^ Experiment title.
     , ideMetadataMaps       :: [(String, MM.MultiMap String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
     }
-    deriving (Eq, Show)
+    deriving (Show)
+
+instance Eq IdentifiedExperiment where
+    (IdentifiedExperiment desc1 instName1 title1 _) == (IdentifiedExperiment desc2 instName2 title2 _) = (desc1, instName1, title1) == (desc2, instName2, title2)
 
 -- | A dataset that has been identified on the local filesystem.
 data IdentifiedDataset = IdentifiedDataset
