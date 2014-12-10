@@ -838,6 +838,7 @@ createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
 -- | Convert the DICOM files in a directory to MINC and upload.
 uploadDicomAsMinc
   :: [DicomFile -> Bool]                    -- ^ Filters to match instrument.
+     -> [DicomFile -> Maybe String]         -- ^ Fields to use in the instrument metadata field.
      -> [DicomFile -> Maybe String]         -- ^ Fields to use in the experiment's title.
      -> [DicomFile -> Maybe String]         -- ^ Fields to use in the dataset's title.
      -> (String
@@ -845,6 +846,7 @@ uploadDicomAsMinc
          -> String
          -> String
          -> [String]
+         -> [DicomFile -> Maybe String]
          -> [DicomFile -> Maybe String]
          -> [DicomFile]
          -> Maybe IdentifiedExperiment)     -- ^ Identify an experiment.
@@ -863,7 +865,7 @@ uploadDicomAsMinc
      -> (String, String, String, String, String, String, [String]) -- ^ Experiment schema, dataset schema, file schema, default institution name, default department name, default institution address, default operators.
      -> ReaderT MyTardisConfig IO ()
 
-uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
+uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
     _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
     _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
     let _files = _files1 ++ _files2
@@ -872,10 +874,10 @@ uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExper
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
     liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
+    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
                                 liftIO $ putStrLn $ " uploadDicomAsMinc: result from uploadDicomAsMincOneGroup: " ++ show result
 
-uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
+uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
     writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators))
 
     schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
@@ -887,6 +889,7 @@ uploadDicomAsMincOneGroup files instrumentFilters experimentFields datasetFields
                 defaultInstitutionalAddress
                 defaultOperators
                 experimentFields
+                instrumentMetadataFields
                 files
 
     e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)

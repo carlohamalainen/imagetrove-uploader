@@ -102,6 +102,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
 
     forM_ instrumentConfigs $ \( instrumentFilters
                                , instrumentFiltersT
+                               , instrumentMetadataFields
                                , experimentFields
                                , datasetFields
                                , schemaExperiment
@@ -113,7 +114,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
                                , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
                                                                     forM_ groups $ \files -> do
                                                                         let
-                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields files
+                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files
                                                                             hash = (sha256 . unwords) (map dicomFilePath files)
 
                                                                         liftIO $ if showFileSets cmdShow
@@ -124,7 +125,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
 dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
+    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
     A.Success project12345 <- getOrCreateGroup "Project 12345"
@@ -148,6 +149,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
 
     let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
                                , instrumentFiltersT
+                               , instrumentMetadataFields
                                , experimentFields
                                , datasetFields
                                , schemaExperiment
@@ -171,6 +173,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
 
     forM_ instrumentConfigs $ \( instrumentFilters
                                , instrumentFiltersT
+                               , instrumentMetadataFields
                                , experimentFields
                                , datasetFields
                                , schemaExperiment
@@ -198,6 +201,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                 oneGroupResult <- uploadDicomAsMincOneGroup
                     files
                     instrumentFilters
+                    instrumentMetadataFields
                     experimentFields
                     datasetFields
                     identifyExperiment
@@ -288,18 +292,24 @@ identifyExperiment
     -> String
     -> [String]
     -> [DicomFile -> Maybe String]
+    -> [DicomFile -> Maybe String]
     -> [DicomFile]
     -> Maybe IdentifiedExperiment
-identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators titleFields files =
+identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators titleFields instrumentFields files = do
     let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
-        _title = ((\f -> titleFields <*> [f]) <$> oneFile) in
-        case title of
-            Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
-            Just title' -> Just $ IdentifiedExperiment
-                                    description
-                                    institution
-                                    (intercalate "/" title')
-                                    [(schemaExperiment, m)]
+        _title = ((\f -> titleFields <*> [f]) <$> oneFile)
+
+    when (isNothing instrument) $ error $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile
+
+    let m' = MM.insert "Instrument" (fromJust instrument) m
+
+    case title of
+        Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
+        Just title' -> Just $ IdentifiedExperiment
+                                description
+                                institution
+                                (intercalate "/" title')
+                                [(schemaExperiment, m')]
   where
     oneFile = headMay files
 
@@ -313,6 +323,8 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
 
     institutionalDepartmentName = defaultInstitutionalDepartmentName -- FIXME fromMaybe defaultInstitutionalDepartmentName $ join $ dicomInstitutionName    <$> oneFile
     institutionAddress          = fromMaybe defaultInstitutionalAddress        $ join $ dicomInstitutionAddress <$> oneFile
+
+    instrument = (intercalate " ") <$> join (allJust <$> (\f -> instrumentFields <*> [f]) <$> oneFile)
 
     m = MM.fromList $ m1 ++ m2
 
@@ -427,6 +439,7 @@ readInstrumentConfigs
             [(String, String)],
             [DicomFile -> Maybe String],
             [DicomFile -> Maybe String],
+            [DicomFile -> Maybe String],
             String, String, String, String, String, String, [String])]
 readInstrumentConfigs f = do
     cfg <- load [Required f]
@@ -445,12 +458,17 @@ readInstrumentConfig
              [(String, String)],
              [DicomFile -> Maybe String],
              [DicomFile -> Maybe String],
+             [DicomFile -> Maybe String],
              String, String, String, String, String, String, [String])
 readInstrumentConfig cfg instrumentName = do
     instrumentFields <- liftM (map toIdentifierFn)    <$> lookup cfg (instrumentName `T.append` ".instrument")
     instrumentFieldsT<- liftM (map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
     experimentFields <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".experiment_title")
     datasetFields    <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".dataset_title")
+
+    -- TODO merge these together
+    instrumentMetadataFields0 <- liftM (map $ \x -> fieldToFn <$> headMay x) <$> lookup cfg (instrumentName `T.append` ".instrument")
+    let instrumentMetadataFields = join $ allJust <$> instrumentMetadataFields0
 
     schemaExperiment <- lookup cfg (instrumentName `T.append` ".schema_experiment")
     schemaDataset    <- lookup cfg (instrumentName `T.append` ".schema_dataset")
@@ -479,6 +497,7 @@ readInstrumentConfig cfg instrumentName = do
 
     case ( instrumentFields
          , instrumentFieldsT
+         , instrumentMetadataFields
          , experimentFields
          , datasetFields
          , schemaExperiment
@@ -489,7 +508,7 @@ readInstrumentConfig cfg instrumentName = do
          , defaultInstitutionalAddress
          , defaultOperators
          ) of
-        (Just instrumentFields', Just instrumentFieldsT', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (instrumentFields', instrumentFieldsT', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
+        (Just instrumentFields', Just instrumentFieldsT', Just instrumentMetadataFields', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (instrumentFields', instrumentFieldsT', instrumentMetadataFields', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
   where
