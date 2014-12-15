@@ -17,8 +17,12 @@ import Data.List (isPrefixOf)
 import Data.Maybe
 import Data.Traversable (traverse)
 import Network.HTTP.Client (defaultManagerSettings, managerResponseTimeout)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.Mime
 import Network.Wreq
+
+import qualified Network.Connection     as NetworkConnection
+import qualified Network.HTTP.Conduit   as NetworkHTTPConduit
 
 import Safe
 
@@ -69,8 +73,15 @@ defaultMyTardisOptions :: String -- ^ Hostname
                        -> MyTardisConfig
 defaultMyTardisOptions host user pass logfile = MyTardisConfig host "/api/v1" user pass opts logfile
   where
-    opts = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
-                    & auth .~ basicAuth (B8.pack user) (B8.pack pass)
+    opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
+    optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
+                         & auth .~ basicAuth (B8.pack user) (B8.pack pass)
+    optsHTTPS = defaults & manager .~ Left (tlsManager { managerResponseTimeout = Just 3000000000 } )
+                         & auth .~ basicAuth (B8.pack user) (B8.pack pass)
+
+    -- FIXME The first 'True' to TLSSettingsSimple disables certificate checking. Just for testing at the moment!
+    -- See 'settingDisableCertificateValidation' in http://hackage.haskell.org/package/connection-0.2.3/docs/Network-Connection.html
+    tlsManager = NetworkHTTPConduit.mkManagerSettings (NetworkConnection.TLSSettingsSimple True False False) Nothing
 
 -- | Wrapper around Wreq's 'postWith' that uses our settings in a 'ReaderT'.
 postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
