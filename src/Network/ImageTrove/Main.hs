@@ -183,7 +183,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                                , defaultInstitutionalDepartmentName
                                , defaultInstitutionalAddress
                                , defaultOperators) -> do
-            _ogroups <- liftIO $ getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+            _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
             liftIO $ print _ogroups
             let Right ogroups = _ogroups
 
@@ -251,8 +251,9 @@ imageTroveMain = do
 
     let host = fromMaybe "http://localhost:8000" $ optHost opts'
         f    = optConfigFile opts'
+        orthHost = "http://localhost:8043"
 
-    mytardisOpts <- getConfig host f Nothing
+    mytardisOpts <- getConfig host orthHost f Nothing
 
     case mytardisOpts of
         (Just mytardisOpts') -> runReaderT (dostuff opts') mytardisOpts'
@@ -413,13 +414,17 @@ grabMetadata file = map oops $ concatMap f metadata
 
 
 
-getConfig :: String -> FilePath -> Maybe FilePath -> IO (Maybe MyTardisConfig)
-getConfig host f defaultLogfile = do
+getConfig :: String -> String -> FilePath -> Maybe FilePath -> IO (Maybe MyTardisConfig)
+getConfig host orthHost f defaultLogfile = do
     cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
     logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
+
+    ohost <- lookup cfg "orthanc_host" :: IO (Maybe String)
+
+    let ohost' = if isNothing ohost then orthHost else fromJust ohost
 
     let logfile' = if isNothing logfile then defaultLogfile else logfile
 
@@ -429,7 +434,7 @@ getConfig host f defaultLogfile = do
                   logfile'
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost'
         _                        -> Nothing
 
 readInstrumentConfigs

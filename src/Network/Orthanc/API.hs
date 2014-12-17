@@ -9,8 +9,8 @@ import Control.Applicative
 import Control.Lens
 import Control.Exception.Base (catch, IOException)
 import Control.Monad
-import Control.Monad.Identity()
-import Control.Monad.Reader()
+import Control.Monad.Identity
+import Control.Monad.Reader
 
 import Data.Aeson
 import Data.Aeson.Types()
@@ -20,6 +20,9 @@ import Data.Traversable (traverse)
 import Network.HTTP.Client (defaultManagerSettings, managerResponseTimeout)
 import Network.Mime()
 import Network.Wreq
+
+import Network.MyTardis.API (MyTardisConfig(..))
+
 
 import Safe
 
@@ -174,8 +177,8 @@ instance FromJSON OrthancTags where
         v .:? "0018,0024"
     parseJSON _          = mzero
 
-getPatients :: IO (Result [String])
-getPatients = do
+getPatients :: ReaderT MyTardisConfig IO (Result [String])
+getPatients = liftIO $ do
     let host = "http://localhost:8042"
 
     r <- getWith opts (host </> "patients")
@@ -185,8 +188,8 @@ getPatients = do
         Nothing     -> Error "Could not decode resource."
 
 
-getPatient :: String -> IO (Result OrthancPatient)
-getPatient oid = do
+getPatient :: String -> ReaderT MyTardisConfig IO (Result OrthancPatient)
+getPatient oid = liftIO $ do
     let host = "http://localhost:8042"
 
     r <- getWith opts (host </> "patients" </> oid)
@@ -199,11 +202,11 @@ getPatient oid = do
                             Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
-getStudy :: String -> IO (Result OrthancStudy)
+getStudy :: String -> ReaderT MyTardisConfig IO (Result OrthancStudy)
 getStudy sid = do
     let host = "http://localhost:8042"
 
-    r <- getWith opts (host </> "studies" </> sid)
+    r <- liftIO $ getWith opts (host </> "studies" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> let s = fromJSON v in
@@ -213,11 +216,11 @@ getStudy sid = do
                             Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
-getSeries :: String -> IO (Result OrthancSeries)
+getSeries :: String -> ReaderT MyTardisConfig IO (Result OrthancSeries)
 getSeries sid = do
     let host = "http://localhost:8042"
 
-    r <- getWith opts (host </> "series" </> sid)
+    r <- liftIO $ getWith opts (host </> "series" </> sid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> let s = fromJSON v in
@@ -227,33 +230,33 @@ getSeries sid = do
                             Error   e       -> Error e
         Nothing     -> Error "Could not decode resource."
 
-getInstance :: String -> IO (Result OrthancInstance)
+getInstance :: String -> ReaderT MyTardisConfig IO (Result OrthancInstance)
 getInstance iid = do
     let host = "http://localhost:8042"
 
-    r <- getWith opts (host </> "instances" </> iid)
+    r <- liftIO $ getWith opts (host </> "instances" </> iid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
         Nothing     -> Error "Could not decode resource."
 
-getTags :: String -> IO (Result OrthancTags)
+getTags :: String -> ReaderT MyTardisConfig IO (Result OrthancTags)
 getTags iid = do
     let host = "http://localhost:8042"
 
-    r <- getWith opts (host </> "instances" </> iid </> "tags")
+    r <- liftIO $ getWith opts (host </> "instances" </> iid </> "tags")
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
         Nothing     -> Error "Could not decode resource."
 
-getPatientsStudies :: OrthancPatient -> IO [Result OrthancStudy]
+getPatientsStudies :: OrthancPatient -> ReaderT MyTardisConfig IO [Result OrthancStudy]
 getPatientsStudies patient = mapM getStudy $ opStudies patient
 
-getStudysSeries :: OrthancStudy -> IO [Result OrthancSeries]
+getStudysSeries :: OrthancStudy -> ReaderT MyTardisConfig IO [Result OrthancSeries]
 getStudysSeries study = mapM getSeries $ ostudySeries study
 
-getAllPatients :: IO [Result OrthancPatient]
+getAllPatients :: ReaderT MyTardisConfig IO [Result OrthancPatient]
 getAllPatients = flattenResult <$> join (traverse (mapM getPatient) <$> getPatients)
 
 flattenResult :: Result [Result a] -> [Result a]
@@ -266,11 +269,11 @@ crossProduct variables values = do
     bs <- forM as $ const values
     zip as bs
 
-majorOrthancGroups :: IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
+majorOrthancGroups :: ReaderT MyTardisConfig IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
 majorOrthancGroups = do
     patients <- getAllPatients
 
-    putStrLn $ "majorOrthancGroups: |patients| = " ++ show (length patients)
+    liftIO $ putStrLn $ "majorOrthancGroups: |patients| = " ++ show (length patients)
 
     x <- forM patients $ \p -> do studies <- flattenResult <$> traverse getPatientsStudies p
                                   let patientsAndStudies = crossProduct [p] studies
@@ -293,15 +296,15 @@ extendWithOneInstance (patient, study, series) = do
 
     case oneInstance of
         (Just (Success oneInstance')) -> return [(patient, study, series, oneInstance')]
-        (Just (Error e))              -> do putStrLn $ "Error while retrieving single instance: " ++ e
+        (Just (Error e))              -> do liftIO $ putStrLn $ "Error while retrieving single instance: " ++ e
                                             return []
-        (Nothing)                     -> do putStrLn $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
+        (Nothing)                     -> do liftIO $ putStrLn $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
                                             return []
 
 extendWithTags (patient, study, series, oneInstance) = do
     tags <- getTags (oinstID oneInstance)
     case tags of Success tags' -> return [(patient, study, series, oneInstance, tags')]
-                 Error e       -> do putStrLn $ "Warning: could not retrieve tags for instance: " ++ e
+                 Error e       -> do liftIO $ putStrLn $ "Warning: could not retrieve tags for instance: " ++ e
                                      return []
 
 catResults [] = []
