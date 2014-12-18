@@ -21,8 +21,7 @@ import Network.HTTP.Client (defaultManagerSettings, managerResponseTimeout)
 import Network.Mime()
 import Network.Wreq
 
-import Network.MyTardis.API (MyTardisConfig(..))
-
+import Network.MyTardis.API (writeLog, MyTardisConfig(..))
 
 import Safe
 
@@ -177,11 +176,14 @@ instance FromJSON OrthancTags where
         v .:? "0018,0024"
     parseJSON _          = mzero
 
-getPatients :: ReaderT MyTardisConfig IO (Result [String])
-getPatients = liftIO $ do
-    let host = "http://localhost:8042"
+askHost :: ReaderT MyTardisConfig IO String
+askHost = orthancHost <$> ask
 
-    r <- getWith opts (host </> "patients")
+getPatients :: ReaderT MyTardisConfig IO (Result [String])
+getPatients = do
+    host <- askHost
+
+    r <- liftIO $ getWith opts (host </> "patients")
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
@@ -189,10 +191,10 @@ getPatients = liftIO $ do
 
 
 getPatient :: String -> ReaderT MyTardisConfig IO (Result OrthancPatient)
-getPatient oid = liftIO $ do
-    let host = "http://localhost:8042"
+getPatient oid = do
+    host <- askHost
 
-    r <- getWith opts (host </> "patients" </> oid)
+    r <- liftIO $ getWith opts (host </> "patients" </> oid)
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> let p = fromJSON v in
@@ -204,7 +206,7 @@ getPatient oid = liftIO $ do
 
 getStudy :: String -> ReaderT MyTardisConfig IO (Result OrthancStudy)
 getStudy sid = do
-    let host = "http://localhost:8042"
+    host <- askHost
 
     r <- liftIO $ getWith opts (host </> "studies" </> sid)
 
@@ -218,7 +220,7 @@ getStudy sid = do
 
 getSeries :: String -> ReaderT MyTardisConfig IO (Result OrthancSeries)
 getSeries sid = do
-    let host = "http://localhost:8042"
+    host <- askHost
 
     r <- liftIO $ getWith opts (host </> "series" </> sid)
 
@@ -232,7 +234,7 @@ getSeries sid = do
 
 getInstance :: String -> ReaderT MyTardisConfig IO (Result OrthancInstance)
 getInstance iid = do
-    let host = "http://localhost:8042"
+    host <- askHost
 
     r <- liftIO $ getWith opts (host </> "instances" </> iid)
 
@@ -242,7 +244,7 @@ getInstance iid = do
 
 getTags :: String -> ReaderT MyTardisConfig IO (Result OrthancTags)
 getTags iid = do
-    let host = "http://localhost:8042"
+    host <- askHost
 
     r <- liftIO $ getWith opts (host </> "instances" </> iid </> "tags")
 
@@ -273,7 +275,7 @@ majorOrthancGroups :: ReaderT MyTardisConfig IO [(OrthancPatient, OrthancStudy, 
 majorOrthancGroups = do
     patients <- getAllPatients
 
-    liftIO $ putStrLn $ "majorOrthancGroups: |patients| = " ++ show (length patients)
+    writeLog $ "majorOrthancGroups: |patients| = " ++ show (length patients)
 
     x <- forM patients $ \p -> do studies <- flattenResult <$> traverse getPatientsStudies p
                                   let patientsAndStudies = crossProduct [p] studies
@@ -296,35 +298,35 @@ extendWithOneInstance (patient, study, series) = do
 
     case oneInstance of
         (Just (Success oneInstance')) -> return [(patient, study, series, oneInstance')]
-        (Just (Error e))              -> do liftIO $ putStrLn $ "Error while retrieving single instance: " ++ e
+        (Just (Error e))              -> do writeLog $ "Error while retrieving single instance: " ++ e
                                             return []
-        (Nothing)                     -> do liftIO $ putStrLn $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
+        (Nothing)                     -> do writeLog $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
                                             return []
 
 extendWithTags (patient, study, series, oneInstance) = do
     tags <- getTags (oinstID oneInstance)
     case tags of Success tags' -> return [(patient, study, series, oneInstance, tags')]
-                 Error e       -> do liftIO $ putStrLn $ "Warning: could not retrieve tags for instance: " ++ e
+                 Error e       -> do writeLog $ "Warning: could not retrieve tags for instance: " ++ e
                                      return []
 
 catResults [] = []
 catResults (Success x:xs) = x : catResults xs
 catResults (Error _:xs) = catResults xs
 
-getSeriesArchive :: String -> IO (Either String (FilePath, FilePath))
+getSeriesArchive :: String -> ReaderT MyTardisConfig IO (Either String (FilePath, FilePath))
 getSeriesArchive sid = do
-    let host = "http://localhost:8042"
+    host <- askHost
 
-    print $ "getSeriesArchive: " ++ sid
+    writeLog $ "getSeriesArchive: " ++ sid
 
-    r <- getWith opts (host </> "series" </> sid </> "archive")
+    r <- liftIO $ getWith opts (host </> "series" </> sid </> "archive")
 
     case r ^? responseBody of
-        Just body -> catch (do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
-                               let zipfile = tempDir </> (sid ++ ".zip")
-                               BL.writeFile zipfile body
-                               return $ Right (tempDir, zipfile))
-                           (\e -> return $ Left $ show (e :: IOException))
+        Just body -> liftIO $ catch (do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
+                                        let zipfile = tempDir </> (sid ++ ".zip")
+                                        BL.writeFile zipfile body
+                                        return $ Right (tempDir, zipfile))
+                                    (\e -> return $ Left $ show (e :: IOException))
         Nothing   -> return $ Left "Error: empty response body in getSeriesArchive."
 
 unpackArchive :: FilePath -> FilePath -> IO (Either String FilePath)
