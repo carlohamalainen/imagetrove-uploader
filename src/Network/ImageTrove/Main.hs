@@ -88,6 +88,14 @@ getDicomDir opts = fromMaybe "." (optDirectory opts)
 hashFiles :: [FilePath] -> String
 hashFiles = sha256 . unwords
 
+createCAIProjectGroup linksDir = do
+    projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+
+    case projectID of A.Success projectID' -> do projectResult <- getOrCreateGroup $ "CAI " ++ projectID'
+                                                 case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created CAI project group: " ++ projectID'
+                                                                       A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating CAI project group: " ++ projErr
+                      A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve CAI Project ID from ReferringPhysician field: " ++ err
+
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
 dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
@@ -188,12 +196,14 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
             let Right ogroups = _ogroups
 
             forM_ ogroups $ \(patient, study, series, oneInstance, tags) -> do
-                Right (tempDir, zipfile) <- liftIO $ getSeriesArchive $ oseriesID series
+                Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
 
                 liftIO $ print (tempDir, zipfile)
 
                 Right linksDir <- liftIO $ unpackArchive tempDir zipfile
                 liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
+
+                createCAIProjectGroup linksDir
 
                 files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
@@ -237,13 +247,13 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                     (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                     (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
+                -- FIXME Add --cai-project-db option to executable.
+    --
     -- FIXME Just for testing, create some accounts and assign all experiments to these users.
-    A.Success project12345 <- getOrCreateGroup "Project 12345"
-
-    cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
-
-    A.Success experiments <- getExperiments
-    forM_ experiments $ flip addGroupReadOnlyAccess project12345
+    -- A.Success project12345 <- getOrCreateGroup "Project 12345"
+    -- cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
+    -- A.Success experiments <- getExperiments
+    -- forM_ experiments $ flip addGroupReadOnlyAccess project12345
 
 imageTroveMain :: IO ()
 imageTroveMain = do
@@ -263,16 +273,15 @@ imageTroveMain = do
 
     opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-uploader - upload DICOM files to a MyTARDIS server" )
 
-{-
-caiProjectID :: [DicomFile] -> A.Result [PS]
+caiProjectID :: [DicomFile] -> A.Result String
 caiProjectID files = let oneFile = headMay files in
     case oneFile of
         Nothing   -> A.Error "No DICOM files; can't determine CAI Project ID."
         Just file -> case dicomReferringPhysicianName file of
                         Nothing     -> A.Error "Referring Physician Name field is empty; can't determine CAI Project ID."
                         Just rphys  -> if is5digits rphys
-                                            then A.Success [mkCaiExperimentPS rphys]
-                                            else A.Error $ "Referring Physician Name is not a 5 digit number: " ++ rphys
+                                            then A.Success rphys
+                                            else A.Error   $ "Referring Physician Name is not a 5 digit number: " ++ rphys
 
   where
 
@@ -284,7 +293,6 @@ caiProjectID files = let oneFile = headMay files in
       case reads s of
           [(a, "")] -> Just a
           _         -> Nothing
--}
 
 identifyExperiment
     :: String
@@ -304,13 +312,17 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
 
     let m' = MM.insert "Instrument" (fromJust instrument) m
 
+    let m'' = case caiProjectID files of
+                        A.Success caiID -> MM.insert "CAI Project" ("CAI " ++ caiID) m'
+                        A.Error _       -> m'
+
     case title of
         Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
         Just title' -> Just $ IdentifiedExperiment
                                 description
                                 institution
                                 (intercalate "/" title')
-                                [(schemaExperiment, m')]
+                                [(schemaExperiment, m'')]
   where
     oneFile = headMay files
 
