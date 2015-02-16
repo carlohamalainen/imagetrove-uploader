@@ -435,8 +435,10 @@ getConfig host orthHost f defaultLogfile = do
     logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
 
     ohost <- lookup cfg "orthanc_host" :: IO (Maybe String)
-
     let ohost' = if isNothing ohost then orthHost else fromJust ohost
+
+    mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
+    let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
     let logfile' = if isNothing logfile then defaultLogfile else logfile
 
@@ -446,7 +448,7 @@ getConfig host orthHost f defaultLogfile = do
                   logfile'
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost'
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost' mytardisDir'
         _                        -> Nothing
 
 readInstrumentConfigs
