@@ -46,6 +46,7 @@ opts = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeo
 data OrthancPatient = OrthancPatient
     { opID    :: String
     , opIsStable :: Bool
+    , opLastUpdate :: String
     , opMainDicomTags :: M.Map String String
     , opStudies :: [String]
     , opType :: String
@@ -56,6 +57,7 @@ instance FromJSON OrthancPatient where
     parseJSON (Object v) = OrthancPatient <$>
         v .: "ID"               <*>
         v .: "IsStable"         <*>
+        v .: "LastUpdate"       <*>
         v .: "MainDicomTags"    <*>
         v .: "Studies"          <*>
         v .: "Type"
@@ -64,6 +66,7 @@ instance FromJSON OrthancPatient where
 data OrthancStudy = OrthancStudy
     { ostudyID :: String
     , ostudyIsStable  :: Bool
+    , ostudyLastUpdate :: String
     , ostudyMainDicomTags :: M.Map String String
     , ostudyParentPatient :: String
     , ostudySeries :: [String]
@@ -75,6 +78,7 @@ instance FromJSON OrthancStudy where
     parseJSON (Object v) = OrthancStudy <$>
         v .: "ID"               <*>
         v .: "IsStable"         <*>
+        v .: "LastUpdate"       <*>
         v .: "MainDicomTags"    <*>
         v .: "ParentPatient"    <*>
         v .: "Series"           <*>
@@ -86,6 +90,7 @@ data OrthancSeries = OrthancSeries
     , oseriesID :: String
     , oseriesInstances :: [String]
     , oseriesIsStable :: Bool
+    , oseriesLastUpdate :: String
     , oseriesMainDicomTags :: M.Map String String
     , oseriesParentStudy :: String
     , oseriesStatus :: String
@@ -99,6 +104,7 @@ instance FromJSON OrthancSeries where
         v .: "ID"                        <*>
         v .: "Instances"                 <*>
         v .: "IsStable"                  <*>
+        v .: "LastUpdate"                <*>
         v .: "MainDicomTags"             <*>
         v .: "ParentStudy"               <*>
         v .: "Status"                    <*>

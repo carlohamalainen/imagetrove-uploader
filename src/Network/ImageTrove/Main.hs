@@ -35,6 +35,10 @@ import Control.Concurrent (threadDelay)
 
 import System.Unix.Directory (removeRecursiveSafely)
 
+import Data.Time.Clock (getCurrentTime, diffUTCTime, secondsToDiffTime, UTCTime(..))
+import Data.Time.Format (parseTime)
+import System.Locale (defaultTimeLocale)
+
 data Command
     = CmdUploadAll       UploadAllOptions
     | CmdUploadOne       UploadOneOptions
@@ -193,9 +197,30 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                                , defaultOperators) -> do
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
             liftIO $ print _ogroups
-            let Right ogroups = _ogroups
+            let Right ogroups = _ogroups -- FIXME Sheesh, catch the possible Left here.
 
-            forM_ ogroups $ \(patient, study, series, oneInstance, tags) -> do
+            -- FIXME Should this be here? Elsewhere?
+            -- Filtering out non-recent patients.
+            -- ogroups :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
+
+            -- FIXME Just for testing, doing only experiments that were updated in the last two hours.
+            now <- liftIO getCurrentTime
+
+            let updatedTimes = map (\(p, _, _, _, _) -> parseTime defaultTimeLocale "%Y%m%dT%H%M%S" $ opLastUpdate p) ogroups :: [Maybe UTCTime]
+                deltas = map (fmap $ realToFrac . diffUTCTime now) updatedTimes
+
+            liftIO $ putStrLn $ "Time deltas of available experiments: " ++ show deltas
+
+            let isRecentEnough :: Maybe Double -> Bool
+                isRecentEnough t = case t of
+                                        Nothing -> True -- FIXME If the LastUpdate field is stuffed, assume it's new?
+                                        Just t' -> t' <= 2*60*60 -- 2 hours
+
+            let recentOgroups = map snd $ filter (isRecentEnough . fst) (zip deltas ogroups)
+
+            liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
+
+            forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
                 Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
 
                 liftIO $ print (tempDir, zipfile)
