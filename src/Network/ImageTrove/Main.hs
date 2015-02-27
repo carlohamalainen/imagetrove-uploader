@@ -40,6 +40,8 @@ import Data.Time.Clock (getCurrentTime, diffUTCTime, secondsToDiffTime, UTCTime(
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
+import System.Directory (getCurrentDirectory, setCurrentDirectory)
+
 data Command
     = CmdUploadAll       UploadAllOptions
     | CmdUploadOne       UploadOneOptions
@@ -275,7 +277,9 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
 
 dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
     if uploadFromDicomForever dicomOpts
-        then do forever $ do uploadDicomAction opts
+        then do origDir <- liftIO getCurrentDirectory
+                forever $ do liftIO $ setCurrentDirectory origDir
+                             uploadDicomAction opts
                              let sleepMinutes = 1
                              liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
                              liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
