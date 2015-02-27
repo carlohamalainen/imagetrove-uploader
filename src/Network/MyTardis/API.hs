@@ -51,7 +51,7 @@ import System.Unix.Directory (removeRecursiveSafely)
 
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
-    MyTardisConfig _ _ _ _ _ logfile _ _ <- ask
+    MyTardisConfig _ _ _ _ _ logfile _ _ _ <- ask
     liftIO $ traverse (`hPutStrLn` msg) logfile
     return ()
 
@@ -64,6 +64,7 @@ data MyTardisConfig = MyTardisConfig
     , imageTroveLogFile  :: Maybe Handle
     , orthancHost        :: String -- ^ URL to Orthanc web service, e.g. \"http://10.0.0.10:8042\"
     , mytardisDir        :: String -- ^ Path to MyTARDIS storage directory, e.g. \"/imagetrove\"
+    , mytardisDebug      :: Bool   -- ^ If set to "True" then dicom conversion directories are not removed.
     }
     deriving Show
 
@@ -74,8 +75,9 @@ defaultMyTardisOptions :: String -- ^ MyTARDIS host URL.
                        -> Maybe Handle -- ^ Log file.
                        -> String -- ^ Orthanc host URL.
                        -> String -- ^ MyTARDIS storage directory.
+                       -> Bool   -- ^ Debug mode.
                        -> MyTardisConfig
-defaultMyTardisOptions host user pass logfile orthHost mytardisDir = MyTardisConfig host "/api/v1" user pass opts logfile orthHost mytardisDir
+defaultMyTardisOptions host user pass logfile orthHost mytardisDir debug = MyTardisConfig host "/api/v1" user pass opts logfile orthHost mytardisDir debug
   where
     opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
     optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
@@ -90,14 +92,14 @@ defaultMyTardisOptions host user pass logfile orthHost mytardisDir = MyTardisCon
 -- | Wrapper around Wreq's 'postWith' that uses our settings in a 'ReaderT'.
 postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 postWith' x v = do
-    MyTardisConfig host apiBase user pass opts logfile _ _ <- ask
+    MyTardisConfig host apiBase user pass opts logfile _ _ _ <- ask
     writeLog $ "postWith': " ++ show (x, v)
     liftIO $ postWith opts (host ++ apiBase ++ x) v
 
 -- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 putWith' x v = do
-    MyTardisConfig host apiBase user pass opts logfile _ _ <- ask
+    MyTardisConfig host apiBase user pass opts logfile _ _ _ <- ask
     writeLog $ "putWith': " ++ show (x, v)
     liftIO $ putWith opts (host ++ apiBase ++ x) v
 
@@ -187,7 +189,7 @@ getFileWithMetadata idf = getResourceWithMetadata (getDatasetFiles $ idfDatasetU
 getDatasetFiles :: URI -> ReaderT MyTardisConfig IO (Result [RestDatasetFile])
 getDatasetFiles uri = do
     writeLog $ "getDatasetFiles: uri: " ++ show uri
-    MyTardisConfig _ apiBase _ _ _ _ _ _ <- ask
+    MyTardisConfig _ apiBase _ _ _ _ _ _ _ <- ask
     getList $ dropIfPrefix apiBase $ uri ++ "files"
 
 -- | Create an experiment. If an experiment already exists in MyTARDIS that matches our
@@ -379,7 +381,7 @@ getResource :: forall a. FromJSON a => URI -> ReaderT MyTardisConfig IO (Result 
 getResource uri = do
     writeLog $ "getResource: " ++ uri
 
-    MyTardisConfig host _ _ _ opts _ _ _ <- ask
+    MyTardisConfig host _ _ _ opts _ _ _ _ <- ask
     r <- liftIO $ getWith opts (host ++ uri)
 
     case (join $ decode <$> r ^? responseBody :: Maybe Value) of
@@ -462,7 +464,7 @@ getList :: forall a. FromJSON a => String -> ReaderT MyTardisConfig IO (Result [
 getList url = do
     writeLog $ "getList: " ++ url
 
-    MyTardisConfig host apiBase _ _ opts _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
     body <- liftIO $ (^? responseBody) <$> getWith opts (host ++ apiBase ++ url)
 
     let objects = join $ getObjects <$> body
@@ -554,7 +556,7 @@ copyFileToStore
 copyFileToStore filepath dsf = do
     writeLog $ "copyFileToStore: " ++ show (filepath, dsf)
 
-    MyTardisConfig _ _ _ _ _ _ _ mytardisDir <- ask
+    MyTardisConfig _ _ _ _ _ _ _ mytardisDir _ <- ask
 
     results <- forM (dsfReplicas dsf) $ \r -> do
         let filePrefix = "file://" :: String
@@ -585,21 +587,21 @@ copyFileToStore filepath dsf = do
 deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response ())
 deleteExperiment x = do
     writeLog $ "deleteExperiment: deleting experiment with ID " ++ show (eiID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ eiResourceURI x
 
 -- | Delete a dataset.
 deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response ())
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
-    MyTardisConfig host apiBase _ _ opts logfile _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
 deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response ())
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
-    MyTardisConfig host apiBase _ _ opts logfile _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsfResourceURI x
 
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment
@@ -972,19 +974,16 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFi
             (Success dsf', Right (Success dsft')) -> do liftIO $ putStrLn $ "Successfully uploaded file: " ++ f
                                                         liftIO $ putStrLn $ "Successfully uploaded thumbnail: " ++ show thumbnail
                                                         return (BothOK, dsf, dsft)
-            (Success dsf', Right (Error e))       -> do liftIO $ putStrLn $ "FIXME2"
+            (Success dsf', Right (Error e))       -> do liftIO $ putStrLn $ "Error when creating thumbnail dataset file: " ++ e
                                                         return (ThumbnailError e, dsf, dsft)
-            (Success dsf', Left e)                -> do liftIO $ putStrLn $ "FIXME3"
+            (Success dsf', Left e)                -> do liftIO $ putStrLn $ "Error (http?) when creating thumbnail dataset file: " ++ e
                                                         return (ThumbnailError e, dsf, dsft)
 
-    -- Can get here if the experiment already exists and the file exists, so should delete the 
-    -- temporary files regardless. Maybe add a debug mode to leave them behind?
-    --if anyCatastrohpicErrors stuff
-    --    then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
-    --    else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
-    --                     removeRecursiveSafely tempDir
+    debug <- mytardisDebug <$> ask
 
-    liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
-                removeRecursiveSafely tempDir
+    if debug
+        then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
+        else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
+                         removeRecursiveSafely tempDir
 
     return stuff

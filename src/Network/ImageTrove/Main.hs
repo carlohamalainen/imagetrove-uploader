@@ -63,6 +63,7 @@ data UploaderOptions = UploaderOptions
     { optDirectory      :: Maybe FilePath
     , optHost           :: Maybe String
     , optConfigFile     :: FilePath
+    , optDebug          :: Bool
     , optCommand        :: Command
     }
     deriving (Eq, Show)
@@ -85,9 +86,12 @@ pUploaderOptions = UploaderOptions
     <$> optional (strOption (long "input-dir"     <> metavar "DIRECTORY" <> help "Directory with DICOM files."))
     <*> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
     <*>          (strOption (long "config"        <> metavar "CONFIG"    <> help "Configuration file."))
+    <*>          (switch    (long "debug"                                <> help "Debug mode."))
     <*> subparser x
   where
-    x    = cmd1 <> cmd2 <> cmd3 <> cmd4
+    -- x    = cmd1 <> cmd2 <> cmd3 <> cmd4
+    -- FIXME For the moment just do DICOM server stuff.
+    x    = cmd4
     cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
     cmd2 = command "upload-one"               (info (helper <*> pUploadOneOptions) (progDesc "Upload a single experiment."))
     cmd3 = command "show-experiments"         (info (helper <*> pShowExprOptions)  (progDesc "Show local experiments."))
@@ -207,7 +211,7 @@ uploadDicomAction opts = do
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
-dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
+dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
     let dir = getDicomDir opts
 
     -- FIXME let user specify glob
@@ -238,7 +242,7 @@ dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
                                                                             then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
                                                                             else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
 
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
+dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
     let hash = uploadOneHash oneOpts
 
     let dir = getDicomDir opts
@@ -271,11 +275,11 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
                     []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
                     _       -> error "Multiple experiments with the same hash. This is a bug."
 
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
+dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
     -- FIXME We ignore dry-run!!!
     uploadAllAction opts
 
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
+dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
     if uploadFromDicomForever dicomOpts
         then do origDir <- liftIO getCurrentDirectory
                 forever $ do liftIO $ setCurrentDirectory origDir
@@ -293,7 +297,7 @@ imageTroveMain = do
         f    = optConfigFile opts'
         orthHost = "http://localhost:8043"
 
-    mytardisOpts <- getConfig host orthHost f Nothing
+    mytardisOpts <- getConfig host orthHost f Nothing False -- FIXME debug mode last param
 
     case mytardisOpts of
         (Just mytardisOpts') -> runReaderT (dostuff opts') mytardisOpts'
@@ -456,8 +460,8 @@ grabMetadata file = map oops $ concatMap f metadata
 
 
 
-getConfig :: String -> String -> FilePath -> Maybe FilePath -> IO (Maybe MyTardisConfig)
-getConfig host orthHost f defaultLogfile = do
+getConfig :: String -> String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
+getConfig host orthHost f defaultLogfile debug = do
     cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
@@ -478,7 +482,7 @@ getConfig host orthHost f defaultLogfile = do
                   logfile'
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost' mytardisDir'
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost' mytardisDir' debug
         _                        -> Nothing
 
 readInstrumentConfigs
