@@ -5,7 +5,8 @@ module Network.ImageTrove.Main where
 import Prelude hiding (lookup)
 
 import Control.Monad.Reader
-import Control.Monad (when)
+import Control.Monad (forever, when)
+import Control.Concurrent (threadDelay)
 import Data.Configurator
 import Data.Configurator.Types
 import Data.Monoid (mempty)
@@ -47,11 +48,14 @@ data Command
     deriving (Eq, Show)
 
 data UploadAllOptions = UploadAllOptions { uploadAllDryRun :: Bool } deriving (Eq, Show)
+
 data UploadOneOptions = UploadOneOptions { uploadOneHash :: String } deriving (Eq, Show)
 
 data ShowExperimentsOptions = ShowExperimentsOptions { showFileSets :: Bool } deriving (Eq, Show)
 
-data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomDryRun :: Bool } deriving (Eq, Show)
+data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomDryRun :: Bool
+                                                                 , uploadFromDicomForever :: Bool
+                                                                 } deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
     { optDirectory      :: Maybe FilePath
@@ -71,7 +75,8 @@ pShowExprOptions :: Parser Command
 pShowExprOptions = CmdShowExperiments <$> ShowExperimentsOptions <$> switch (long "show-file-sets" <> help "Show experiments.")
 
 pUploadFromDicomServerOptions :: Parser Command
-pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> UploadFromDicomServerOptions <$> switch (long "dry-run" <> help "Dry run.")
+pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> (UploadFromDicomServerOptions <$> switch (long "dry-run" <> help "Dry run.")
+                                                                                           <*> switch (long "upload-forever" <> help "Run forever with sleep between uploads."))
 
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
@@ -100,87 +105,12 @@ createCAIProjectGroup linksDir = do
                                                                        A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating CAI project group: " ++ projErr
                       A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve CAI Project ID from ReferringPhysician field: " ++ err
 
-dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
-
-dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
-    let dir = getDicomDir opts
-
-    -- FIXME let user specify glob
-    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
-    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
-    let _files = _files1 ++ _files2
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    forM_ instrumentConfigs $ \( instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
-                                                                    forM_ groups $ \files -> do
-                                                                        let
-                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files
-                                                                            hash = (sha256 . unwords) (map dicomFilePath files)
-
-                                                                        liftIO $ if showFileSets cmdShow
-                                                                            then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
-                                                                            else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
-
-
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
+uploadAllAction opts = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
     forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
-    -- FIXME Just for testing, create some accounts and assign all experiments to these users.
-    A.Success project12345 <- getOrCreateGroup "Project 12345"
-
-    cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
-
-    A.Success experiments <- getExperiments
-    forM_ experiments $ flip addGroupReadOnlyAccess project12345
-
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
-    let hash = uploadOneHash oneOpts
-
-    let dir = getDicomDir opts
-
-    -- FIXME let user specify glob
-    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
-    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
-    let _files = _files1 ++ _files2
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
-
-    let
-        hashes = map (hashFiles . fmap dicomFilePath) groups :: [String]
-        matches = filter ((==) hash . snd) (zip groups hashes) :: [([DicomFile], String)]
-
-    case matches of [match] -> liftIO $ print match
-                    []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
-                    _       -> error "Multiple experiments with the same hash. This is a bug."
-
-dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
+uploadDicomAction opts = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
     forM_ instrumentConfigs $ \( instrumentFilters
@@ -272,13 +202,84 @@ dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer _)) = do
                     (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                     (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
-                -- FIXME Add --cai-project-db option to executable.
-    --
-    -- FIXME Just for testing, create some accounts and assign all experiments to these users.
-    -- A.Success project12345 <- getOrCreateGroup "Project 12345"
-    -- cHamalainen <- getOrCreateUser (Just "Carlo")  (Just "Hamalainen") "c.hamalainen@uq.edu.au" [project12345] True
-    -- A.Success experiments <- getExperiments
-    -- forM_ experiments $ flip addGroupReadOnlyAccess project12345
+
+dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
+
+dostuff opts@(UploaderOptions _ _ _ (CmdShowExperiments cmdShow)) = do
+    let dir = getDicomDir opts
+
+    -- FIXME let user specify glob
+    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
+    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
+    let _files = _files1 ++ _files2
+
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
+
+    forM_ instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , instrumentMetadataFields
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress
+                               , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
+                                                                    forM_ groups $ \files -> do
+                                                                        let
+                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files
+                                                                            hash = (sha256 . unwords) (map dicomFilePath files)
+
+                                                                        liftIO $ if showFileSets cmdShow
+                                                                            then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
+                                                                            else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
+
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadOne oneOpts)) = do
+    let hash = uploadOneHash oneOpts
+
+    let dir = getDicomDir opts
+
+    -- FIXME let user specify glob
+    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
+    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
+    let _files = _files1 ++ _files2
+
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
+
+    let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , instrumentMetadataFields
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress
+                               , defaultOperators) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
+
+    let
+        hashes = map (hashFiles . fmap dicomFilePath) groups :: [String]
+        matches = filter ((==) hash . snd) (zip groups hashes) :: [([DicomFile], String)]
+
+    case matches of [match] -> liftIO $ print match
+                    []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
+                    _       -> error "Multiple experiments with the same hash. This is a bug."
+
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadAll allOpts)) = do
+    -- FIXME We ignore dry-run!!!
+    uploadAllAction opts
+
+dostuff opts@(UploaderOptions _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
+    if uploadFromDicomForever dicomOpts
+        then do forever $ do uploadDicomAction opts
+                             let sleepMinutes = 1
+                             liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
+                             liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
+        else uploadDicomAction opts
 
 imageTroveMain :: IO ()
 imageTroveMain = do
