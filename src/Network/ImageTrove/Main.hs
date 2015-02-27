@@ -117,6 +117,8 @@ uploadAllAction opts = do
     forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
 uploadDicomAction opts = do
+    debug <- mytardisDebug <$> ask
+
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
     forM_ instrumentConfigs $ \( instrumentFilters
@@ -199,8 +201,12 @@ uploadDicomAction opts = do
                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
                                                                                                           removeRecursiveSafely linksDir
                                                                      A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                                                                          putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                                                                          putStrLn $ "Not deleting links directory: " ++ linksDir
+                                                                                                          if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                                                                                           putStrLn $ "Not deleting links directory: " ++ linksDir
+                                                                                                                   else do putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                                                           removeRecursiveSafely tempDir
+                                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                                                                           removeRecursiveSafely linksDir
 
                                                                  liftIO $ print zipfile'
                                                          (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
