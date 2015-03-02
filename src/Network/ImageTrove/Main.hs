@@ -36,12 +36,14 @@ import Control.Concurrent (threadDelay)
 
 import System.Unix.Directory (removeRecursiveSafely)
 
-import Data.Time.Clock (diffUTCTime, secondsToDiffTime, UTCTime)
+import Data.Time.Clock (addUTCTime, diffUTCTime, UTCTime(..), NominalDiffTime(..))
 import Data.Time.LocalTime (getZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
 import System.Directory (getCurrentDirectory, setCurrentDirectory)
+
+import Network.ImageTrove.Acid
 
 data Command
     = CmdUploadAll       UploadAllOptions
@@ -122,6 +124,13 @@ getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe UTCTime
 getPatientLastUpdate tz p = parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
 
 uploadDicomAction opts = do
+
+    -- Current time and timezone:
+    nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
+
+    -- Current time in UTC:
+    let nowUtc = zonedTimeToUTC nowZoned
+
     debug <- mytardisDebug <$> ask
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
@@ -141,25 +150,31 @@ uploadDicomAction opts = do
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             case _ogroups of Left err -> undefined
-                             Right ogroups -> do -- FIXME Should this be here? Elsewhere?
-                                                 -- Filtering out non-recent patients.
-                                                 -- ogroups :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-
-                                                 -- FIXME Just for testing, doing only experiments that were updated in the last two hours.
-                                                 nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
-                                                 let nowUtc = zonedTimeToUTC nowZoned
-
+                             Right ogroups -> do -- Times that available patients have been updated:
                                                  let updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe UTCTime]
-                                                     deltas = map (fmap $ realToFrac . diffUTCTime nowUtc) updatedTimes
 
-                                                 liftIO $ putStrLn $ "Time deltas of available experiments: " ++ show deltas
+                                                 -- Last time that we *started* a run:
+                                                 lastRun <- liftIO $ getLastRunTime
 
-                                                 let isRecentEnough :: Maybe Double -> Bool
-                                                     isRecentEnough t = case t of
-                                                                             Nothing -> True -- FIXME If the LastUpdate field is stuffed, assume it's new?
-                                                                             Just t' -> t' <= 2*60*60 -- 2 hours
+                                                 -- Differences of updatedTimes against the last run time:
+                                                 -- let deltas = map (fmap $ realToFrac . diffUTCTime lastRun) updatedTimes
 
-                                                 let recentOgroups = map snd $ filter (isRecentEnough . fst) (zip deltas ogroups)
+                                                 liftIO $ putStrLn $ "Local timezone: " ++ show tz
+                                                 liftIO $ putStrLn $ "Current time (UTC): " ++ show nowUtc
+                                                 liftIO $ putStrLn $ "Time that last run *started*: " ++ show lastRun
+                                                 liftIO $ putStrLn $ "Times of available experiments: " ++ show updatedTimes
+
+                                                 -- In theory, new data could have appeared in Orthanc while we were runnning the previous time,
+                                                 -- so we will process experiments that have been updated since the value of lastRun. We'll add a few
+                                                 -- minutes fudge factor for out of sync clocks and other weirdness.
+
+                                                 let earliestTimeToProcess = addUTCTime (fromRational (-5*60)) (zonedTimeToUTC lastRun)
+
+                                                 let isRecentEnough :: Maybe UTCTime -> Bool
+                                                     isRecentEnough Nothing = True -- Missing time? Had better process it just to be sure.
+                                                     isRecentEnough (Just t) = t >= earliestTimeToProcess
+
+                                                 let recentOgroups = map snd $ filter (isRecentEnough . fst) (zip updatedTimes ogroups)
 
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
 
@@ -175,7 +190,6 @@ uploadDicomAction opts = do
 
                                                      files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-                                                     -- (restExperiment, restDataset) <- uploadDicomAsMincOneGroup
                                                      oneGroupResult <- uploadDicomAsMincOneGroup
                                                          files
                                                          instrumentFilters
@@ -218,6 +232,9 @@ uploadDicomAction opts = do
                                                          (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
                                                          (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                                                          (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
+
+    liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
+    liftIO $ setLastRunTime nowZoned
 
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
