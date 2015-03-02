@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
+module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime, open) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -29,14 +29,17 @@ queryState = do LastRunState t <- ask
 $(makeAcidic ''LastRunState ['writeState, 'queryState])
 
 time1970 :: ZonedTime
-Just time1970 = parseTime defaultTimeLocale "%Y%m%dT%H%M%S" "19700101000000"
+Just time1970 = parseTime defaultTimeLocale "%Y%m%dT%H%M%S" "19700101T000000"
 
-getLastRunTime :: IO ZonedTime
-getLastRunTime = do
-    acid <- openLocalState $ LastRunState time1970
+getLastRunTime :: AcidState LastRunState -> IO ZonedTime
+getLastRunTime acid = do
     query acid QueryState
 
-setLastRunTime :: ZonedTime -> IO ()
-setLastRunTime t = do
-    acid <- openLocalState $ LastRunState time1970
+setLastRunTime :: AcidState LastRunState -> ZonedTime -> IO ()
+setLastRunTime acid t = do
     update acid $ WriteState t
+
+open :: IO (AcidState LastRunState)
+open = openLocalState $ LastRunState time1970
+
+
