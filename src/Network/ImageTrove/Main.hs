@@ -124,8 +124,6 @@ getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe UTCTime
 getPatientLastUpdate tz p = parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
 
 uploadDicomAction opts = do
-    acid <- liftIO open
-
     -- Current time and timezone:
     nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
 
@@ -155,7 +153,7 @@ uploadDicomAction opts = do
                                                  let updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe UTCTime]
 
                                                  -- Last time that we *started* a run:
-                                                 lastRun <- liftIO $ getLastRunTime acid
+                                                 lastRun <- liftIO $ getLastRunTime
 
                                                  -- Differences of updatedTimes against the last run time:
                                                  -- let deltas = map (fmap $ realToFrac . diffUTCTime lastRun) updatedTimes
@@ -235,7 +233,7 @@ uploadDicomAction opts = do
                                                          (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
     liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
-    liftIO $ setLastRunTime acid nowZoned
+    liftIO $ setLastRunTime nowZoned
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
