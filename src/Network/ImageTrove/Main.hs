@@ -55,8 +55,8 @@ data UploadOneOptions = UploadOneOptions { uploadOneHash :: String } deriving (E
 
 data ShowExperimentsOptions = ShowExperimentsOptions { showFileSets :: Bool } deriving (Eq, Show)
 
-data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomDryRun :: Bool
-                                                                 , uploadFromDicomForever :: Bool
+data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomForever       :: Bool
+                                                                 , uploadFromDicomSleepMinutes  :: Int
                                                                  } deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
@@ -78,8 +78,8 @@ pShowExprOptions :: Parser Command
 pShowExprOptions = CmdShowExperiments <$> ShowExperimentsOptions <$> switch (long "show-file-sets" <> help "Show experiments.")
 
 pUploadFromDicomServerOptions :: Parser Command
-pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> (UploadFromDicomServerOptions <$> switch (long "dry-run" <> help "Dry run.")
-                                                                                           <*> switch (long "upload-forever" <> help "Run forever with sleep between uploads."))
+pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> (UploadFromDicomServerOptions <$> switch (long "upload-forever" <> help "Run forever with sleep between uploads.")
+                                                                                           <*> option auto (long "sleep-minutes"  <> help "Number of minutes to sleep between uploads."))
 
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
@@ -281,7 +281,6 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
                     _       -> error "Multiple experiments with the same hash. This is a bug."
 
 dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
-    -- FIXME We ignore dry-run!!!
     uploadAllAction opts
 
 dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
@@ -289,7 +288,7 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
         then do origDir <- liftIO getCurrentDirectory
                 forever $ do liftIO $ setCurrentDirectory origDir
                              uploadDicomAction opts
-                             let sleepMinutes = 1
+                             let sleepMinutes = uploadFromDicomSleepMinutes dicomOpts
                              liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
                              liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
         else uploadDicomAction opts
