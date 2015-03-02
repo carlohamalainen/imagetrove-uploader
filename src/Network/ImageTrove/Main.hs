@@ -123,7 +123,7 @@ uploadAllAction opts = do
 getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe UTCTime
 getPatientLastUpdate tz p = parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
 
-uploadDicomAction opts = do
+uploadDicomAction opts origDir = do
     -- Current time and timezone:
     nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
 
@@ -153,7 +153,7 @@ uploadDicomAction opts = do
                                                  let updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe UTCTime]
 
                                                  -- Last time that we *started* a run:
-                                                 lastRun <- liftIO $ getLastRunTime
+                                                 lastRun <- liftIO $ setCurrentDirectory origDir >> getLastRunTime
 
                                                  -- Differences of updatedTimes against the last run time:
                                                  -- let deltas = map (fmap $ realToFrac . diffUTCTime lastRun) updatedTimes
@@ -232,6 +232,7 @@ uploadDicomAction opts = do
                                                          (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                                                          (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
+    liftIO $ setCurrentDirectory origDir
     liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
     liftIO $ setLastRunTime nowZoned
 
@@ -308,11 +309,12 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
     if uploadFromDicomForever dicomOpts
         then do origDir <- liftIO getCurrentDirectory
                 forever $ do liftIO $ setCurrentDirectory origDir
-                             uploadDicomAction opts
+                             uploadDicomAction opts origDir
                              let sleepMinutes = uploadFromDicomSleepMinutes dicomOpts
                              liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
                              liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
-        else uploadDicomAction opts
+        else do origDir <- liftIO getCurrentDirectory
+                uploadDicomAction opts origDir
 
 imageTroveMain :: IO ()
 imageTroveMain = do
