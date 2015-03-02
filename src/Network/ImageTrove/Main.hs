@@ -161,6 +161,7 @@ uploadDicomAction opts origDir = do
                                                  liftIO $ putStrLn $ "Local timezone: " ++ show tz
                                                  liftIO $ putStrLn $ "Current time (UTC): " ++ show nowUtc
                                                  liftIO $ putStrLn $ "Time that last run *started*: " ++ show lastRun
+                                                 liftIO $ putStrLn $ "Time that last run *started* (UTC): " ++ show (zonedTimeToUTC lastRun)
                                                  liftIO $ putStrLn $ "Times of available experiments: " ++ show updatedTimes
 
                                                  -- In theory, new data could have appeared in Orthanc while we were runnning the previous time,
@@ -168,6 +169,8 @@ uploadDicomAction opts origDir = do
                                                  -- minutes fudge factor for out of sync clocks and other weirdness.
 
                                                  let earliestTimeToProcess = addUTCTime (fromRational (-5*60)) (zonedTimeToUTC lastRun)
+
+                                                 liftIO $ putStrLn $ "Earliest time to process: " ++ show earliestTimeToProcess
 
                                                  let isRecentEnough :: Maybe UTCTime -> Bool
                                                      isRecentEnough Nothing = True -- Missing time? Had better process it just to be sure.
