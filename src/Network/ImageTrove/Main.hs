@@ -36,7 +36,8 @@ import Control.Concurrent (threadDelay)
 
 import System.Unix.Directory (removeRecursiveSafely)
 
-import Data.Time.Clock (getCurrentTime, diffUTCTime, secondsToDiffTime, UTCTime(..))
+import Data.Time.Clock (diffUTCTime, secondsToDiffTime, UTCTime)
+import Data.Time.LocalTime (getZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
@@ -116,6 +117,10 @@ uploadAllAction opts = do
 
     forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
+-- | Orthanc returns the date/time but has no timezone so append tz here:
+getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe UTCTime
+getPatientLastUpdate tz p = parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
+
 uploadDicomAction opts = do
     debug <- mytardisDebug <$> ask
 
@@ -141,10 +146,11 @@ uploadDicomAction opts = do
                                                  -- ogroups :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
 
                                                  -- FIXME Just for testing, doing only experiments that were updated in the last two hours.
-                                                 now <- liftIO getCurrentTime
+                                                 nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
+                                                 let nowUtc = zonedTimeToUTC nowZoned
 
-                                                 let updatedTimes = map (\(p, _, _, _, _) -> parseTime defaultTimeLocale "%Y%m%dT%H%M%S" $ opLastUpdate p) ogroups :: [Maybe UTCTime]
-                                                     deltas = map (fmap $ realToFrac . diffUTCTime now) updatedTimes
+                                                 let updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe UTCTime]
+                                                     deltas = map (fmap $ realToFrac . diffUTCTime nowUtc) updatedTimes
 
                                                  liftIO $ putStrLn $ "Time deltas of available experiments: " ++ show deltas
 
