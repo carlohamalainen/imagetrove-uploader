@@ -402,10 +402,15 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
 
     description = "" -- FIXME What should this be?
 
-    institution = fromMaybe defaultInstitutionName $ join $ dicomInstitutionName <$> oneFile
+    -- institution = fromMaybe defaultInstitutionName $ join $ dicomInstitutionName <$> oneFile
+    -- The InstitutionName field is missing for the Phoenix Zip Report and this results in two
+    -- different experiments being created in MyTARDIS. So set the institution to be whatever's in the
+    -- config file. Unlikely that a single config file will be run for multiple institutions?
+    institution = defaultInstitutionName
 
     institutionalDepartmentName = defaultInstitutionalDepartmentName -- FIXME fromMaybe defaultInstitutionalDepartmentName $ join $ dicomInstitutionName    <$> oneFile
-    institutionAddress          = fromMaybe defaultInstitutionalAddress        $ join $ dicomInstitutionAddress <$> oneFile
+    -- institutionAddress          = fromMaybe defaultInstitutionalAddress        $ join $ dicomInstitutionAddress <$> oneFile
+    institutionAddress          = defaultInstitutionalAddress
 
     instrument = (intercalate " ") <$> join (allJust <$> (\f -> instrumentFields <*> [f]) <$> oneFile)
 
