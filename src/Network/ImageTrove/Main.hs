@@ -37,13 +37,15 @@ import Control.Concurrent (threadDelay)
 import System.Unix.Directory (removeRecursiveSafely)
 
 import Data.Time.Clock (addUTCTime, diffUTCTime, UTCTime(..), NominalDiffTime(..))
-import Data.Time.LocalTime (getZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
+import Data.Time.LocalTime (getZonedTime, utcToZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
 import System.Directory (getCurrentDirectory, setCurrentDirectory)
 
 import Network.ImageTrove.Acid
+
+import qualified Data.Map as Map
 
 data Command
     = CmdUploadAll       UploadAllOptions
@@ -120,15 +122,28 @@ uploadAllAction opts = do
     forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
 -- | Orthanc returns the date/time but has no timezone so append tz here:
-getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe UTCTime
-getPatientLastUpdate tz p = parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
+getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
+getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
+
+patientsToProcess :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
+                  -> [(String, Maybe ZonedTime)]
+                  -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
+patientsToProcess ogroups hashAndLastUpdated = do
+    m <- loadMap :: IO (M.Map String ZonedTime)
+
+    let blah = zip ogroups hashAndLastUpdated
+
+    return $ map fst $ filter (f m) blah
+
+  where
+    f m (_, (h, Just lu)) = case M.lookup h m of
+                                Nothing         -> True
+                                Just luPrevious -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu
+    f m (_, (h, Nothing)) = True
 
 uploadDicomAction opts origDir = do
     -- Current time and timezone:
     nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
-
-    -- Current time in UTC:
-    let nowUtc = zonedTimeToUTC nowZoned
 
     debug <- mytardisDebug <$> ask
 
@@ -149,35 +164,17 @@ uploadDicomAction opts origDir = do
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             case _ogroups of Left err -> undefined
-                             Right ogroups -> do -- Times that available patients have been updated:
-                                                 let updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe UTCTime]
+                             Right ogroups -> do 
+                                                 let -- Times that available patients have been updated:
+                                                     updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe ZonedTime]
 
-                                                 -- Last time that we *started* a run:
-                                                 lastRun <- liftIO $ setCurrentDirectory origDir >> getLastRunTime
+                                                     -- Hash of each:
+                                                     hashes = map (\(p, _, _, _, _) -> opID p) ogroups
 
-                                                 -- Differences of updatedTimes against the last run time:
-                                                 -- let deltas = map (fmap $ realToFrac . diffUTCTime lastRun) updatedTimes
+                                                     -- Together:
+                                                     hashAndLastUpdated = zip hashes updatedTimes
 
-                                                 liftIO $ putStrLn $ "Local timezone: " ++ show tz
-                                                 liftIO $ putStrLn $ "Current time (UTC): " ++ show nowUtc
-                                                 liftIO $ putStrLn $ "Time that last run *started*: " ++ show lastRun
-                                                 liftIO $ putStrLn $ "Time that last run *started* (UTC): " ++ show (zonedTimeToUTC lastRun)
-                                                 liftIO $ putStrLn $ "Times of available experiments: " ++ show updatedTimes
-
-                                                 -- In theory, new data could have appeared in Orthanc while we were runnning the previous time,
-                                                 -- so we will process experiments that have been updated since the value of lastRun. We'll add a few
-                                                 -- minutes fudge factor for out of sync clocks and other weirdness.
-
-                                                 let earliestTimeToProcess = addUTCTime (fromRational (-5*60)) (zonedTimeToUTC lastRun)
-
-                                                 liftIO $ putStrLn $ "Earliest time to process: " ++ show earliestTimeToProcess
-
-                                                 let isRecentEnough :: Maybe UTCTime -> Bool
-                                                     isRecentEnough Nothing = True -- Missing time? Had better process it just to be sure.
-                                                     isRecentEnough (Just t) = t >= earliestTimeToProcess
-
-                                                 let recentOgroups = map snd $ filter (isRecentEnough . fst) (zip updatedTimes ogroups)
-
+                                                 recentOgroups <- liftIO $ patientsToProcess ogroups hashAndLastUpdated
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
 
                                                  forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
@@ -222,6 +219,7 @@ uploadDicomAction opts origDir = do
                                                                                                           removeRecursiveSafely tempDir
                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
                                                                                                           removeRecursiveSafely linksDir
+                                                                                                          updateLastUpdate (opID patient) nowZoned
                                                                      A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
                                                                                                           if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
                                                                                                                            putStrLn $ "Not deleting links directory: " ++ linksDir
@@ -235,9 +233,9 @@ uploadDicomAction opts origDir = do
                                                          (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                                                          (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
-    liftIO $ setCurrentDirectory origDir
-    liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
-    liftIO $ setLastRunTime nowZoned
+    -- liftIO $ setCurrentDirectory origDir
+    -- liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
+    -- liftIO $ setLastRunTime nowZoned
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
