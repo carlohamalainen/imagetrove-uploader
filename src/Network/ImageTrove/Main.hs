@@ -151,7 +151,10 @@ uploadDicomAction opts origDir = do
     debug <- mytardisDebug <$> ask
 
     cwd <- liftIO getCurrentDirectory
-    let fp = cwd </> ("state_" ++ optConfigFile opts)
+
+    let slashToUnderscore = map (\c -> if c == '/' then '_' else c)
+
+    let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
     liftIO $ createDirectoryIfMissing True fp
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
