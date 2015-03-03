@@ -17,7 +17,7 @@ import qualified Data.Map as Map
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
 type Key   = String
-type Value = ZonedTime
+type Value = Maybe ZonedTime
 
 data KeyValue = KeyValue !(Map.Map Key Value) deriving (Typeable)
 
@@ -47,24 +47,8 @@ loadMap = do
     closeAcidState acid
     return m
 
-updateLastUpdate :: String -> ZonedTime -> IO ()
+updateLastUpdate :: String -> Maybe ZonedTime -> IO ()
 updateLastUpdate hash lastUpdate = do
     acid <- openLocalState (KeyValue Map.empty)
     _ <- update acid (InsertKey hash lastUpdate)
     closeAcidState acid
-
-
-{-
-getLastRunTime :: IO ZonedTime
-getLastRunTime = do
-    acid <- openLocalState $ LastRunState time1970
-    t <- query acid QueryState
-    closeAcidState acid
-    return t
-
-setLastRunTime :: ZonedTime -> IO ()
-setLastRunTime t = do
-    acid <- openLocalState $ LastRunState time1970
-    _ <- update acid $ WriteState t
-    closeAcidState acid
--}

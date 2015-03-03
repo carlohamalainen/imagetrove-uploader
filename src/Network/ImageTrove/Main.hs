@@ -129,7 +129,7 @@ patientsToProcess :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInsta
                   -> [(String, Maybe ZonedTime)]
                   -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
 patientsToProcess ogroups hashAndLastUpdated = do
-    m <- loadMap :: IO (M.Map String ZonedTime)
+    m <- loadMap :: IO (M.Map String (Maybe ZonedTime))
 
     let blah = zip ogroups hashAndLastUpdated
 
@@ -137,13 +137,14 @@ patientsToProcess ogroups hashAndLastUpdated = do
 
   where
     f m (_, (h, Just lu)) = case M.lookup h m of
-                                Nothing         -> True
-                                Just luPrevious -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu
+                                Nothing                 -> True -- hash is not in the map
+                                Just Nothing            -> True -- hash is in the map but no ZonedTime available (perhaps due to parse error from Orthanc's LastUpdate field?)
+                                Just (Just luPrevious)  -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu  -- hash and LastUpdate in map, compare to see if current update time is newer.
     f m (_, (h, Nothing)) = True
 
 uploadDicomAction opts origDir = do
-    -- Current time and timezone:
-    nowZoned@(ZonedTime _ tz) <- liftIO getZonedTime
+    -- Timezone:
+    ZonedTime _ tz <- liftIO getZonedTime
 
     debug <- mytardisDebug <$> ask
 
@@ -219,7 +220,7 @@ uploadDicomAction opts origDir = do
                                                                                                           removeRecursiveSafely tempDir
                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
                                                                                                           removeRecursiveSafely linksDir
-                                                                                                          updateLastUpdate (opID patient) nowZoned
+                                                                                                          updateLastUpdate (opID patient) (getPatientLastUpdate tz patient)
                                                                      A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
                                                                                                           if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
                                                                                                                            putStrLn $ "Not deleting links directory: " ++ linksDir
