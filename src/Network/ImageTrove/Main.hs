@@ -41,7 +41,8 @@ import Data.Time.LocalTime (getZonedTime, utcToZonedTime, zonedTimeToUTC, TimeZo
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
-import System.Directory (getCurrentDirectory, setCurrentDirectory)
+import System.Directory (getCurrentDirectory, setCurrentDirectory, createDirectoryIfMissing)
+import System.FilePath ((</>))
 
 import Network.ImageTrove.Acid
 
@@ -125,11 +126,12 @@ uploadAllAction opts = do
 getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
 getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
 
-patientsToProcess :: [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
+patientsToProcess :: FilePath 
+                  -> [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
                   -> [(String, Maybe ZonedTime)]
                   -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-patientsToProcess ogroups hashAndLastUpdated = do
-    m <- loadMap :: IO (M.Map String (Maybe ZonedTime))
+patientsToProcess fp ogroups hashAndLastUpdated = do
+    m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
 
     let blah = zip ogroups hashAndLastUpdated
 
@@ -147,6 +149,10 @@ uploadDicomAction opts origDir = do
     ZonedTime _ tz <- liftIO getZonedTime
 
     debug <- mytardisDebug <$> ask
+
+    cwd <- liftIO getCurrentDirectory
+    let fp = cwd </> ("state_" ++ optConfigFile opts)
+    liftIO $ createDirectoryIfMissing True fp
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
@@ -175,7 +181,7 @@ uploadDicomAction opts origDir = do
                                                      -- Together:
                                                      hashAndLastUpdated = zip hashes updatedTimes
 
-                                                 recentOgroups <- liftIO $ patientsToProcess ogroups hashAndLastUpdated
+                                                 recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
 
                                                  forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
@@ -220,7 +226,7 @@ uploadDicomAction opts origDir = do
                                                                                                           removeRecursiveSafely tempDir
                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
                                                                                                           removeRecursiveSafely linksDir
-                                                                                                          updateLastUpdate (opID patient) (getPatientLastUpdate tz patient)
+                                                                                                          updateLastUpdate fp (opID patient) (getPatientLastUpdate tz patient)
                                                                      A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
                                                                                                           if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
                                                                                                                            putStrLn $ "Not deleting links directory: " ++ linksDir

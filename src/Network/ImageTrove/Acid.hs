@@ -40,15 +40,15 @@ getMapInternal = do
 
 $(makeAcidic ''KeyValue ['insertKey, 'lookupKey, 'getMapInternal])
 
-loadMap :: IO (Map.Map Key Value)
-loadMap = do
-    acid <- openLocalState (KeyValue Map.empty)
+loadMap :: FilePath -> IO (Map.Map Key Value)
+loadMap fp = do
+    acid <- openLocalStateFrom fp (KeyValue Map.empty)
     m <- query acid GetMapInternal
     closeAcidState acid
     return m
 
-updateLastUpdate :: String -> Maybe ZonedTime -> IO ()
-updateLastUpdate hash lastUpdate = do
-    acid <- openLocalState (KeyValue Map.empty)
+updateLastUpdate :: FilePath -> String -> Maybe ZonedTime -> IO ()
+updateLastUpdate fp hash lastUpdate = do
+    acid <- openLocalStateFrom fp (KeyValue Map.empty)
     _ <- update acid (InsertKey hash lastUpdate)
     closeAcidState acid
