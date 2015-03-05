@@ -12,3 +12,4 @@ ghcid/*
 *.swp
 *.log
 state/*
+state_*conf/*
