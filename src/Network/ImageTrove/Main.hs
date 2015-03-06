@@ -14,9 +14,8 @@ import Data.Traversable (traverse)
 import Data.Either
 import qualified Data.Foldable as DF
 import Data.Maybe
-import Data.List (intercalate)
+import Data.List (isPrefixOf, intercalate)
 import qualified Data.Map as M
-import qualified Data.MultiMap as MM
 import qualified Data.Aeson as A
 import qualified Data.Text as T
 import Options.Applicative
@@ -109,13 +108,13 @@ getDicomDir opts = fromMaybe "." (optDirectory opts)
 hashFiles :: [FilePath] -> String
 hashFiles = sha256 . unwords
 
-createCAIProjectGroup linksDir = do
+createProjectGroup linksDir = do
     projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-    case projectID of A.Success projectID' -> do projectResult <- getOrCreateGroup $ "CAI " ++ projectID'
-                                                 case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created CAI project group: " ++ projectID'
-                                                                       A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating CAI project group: " ++ projErr
-                      A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve CAI Project ID from ReferringPhysician field: " ++ err
+    case projectID of A.Success projectID' -> do projectResult <- getOrCreateGroup $ "Project " ++ projectID'
+                                                 case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created project group: " ++ projectID'
+                                                                       A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating project group: " ++ projErr
+                      A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve Project ID from ReferringPhysician field: " ++ err
 
 uploadAllAction opts = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
@@ -195,7 +194,7 @@ uploadDicomAction opts origDir = do
                                                      Right linksDir <- liftIO $ unpackArchive tempDir zipfile
                                                      liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
-                                                     createCAIProjectGroup linksDir
+                                                     createProjectGroup linksDir
 
                                                      files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
@@ -383,10 +382,10 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
 
     when (isNothing instrument) $ error $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile
 
-    let m' = MM.insert "Instrument" (fromJust instrument) m
+    let m' = M.insert "Instrument" (fromJust instrument) m
 
     let m'' = case caiProjectID files of
-                        A.Success caiID -> MM.insert "CAI Project" ("CAI " ++ caiID) m'
+                        A.Success caiID -> M.insert "Project" ("Project " ++ caiID) m'
                         A.Error _       -> m'
 
     case title of
@@ -417,14 +416,15 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
 
     instrument = (intercalate " ") <$> join (allJust <$> (\f -> instrumentFields <*> [f]) <$> oneFile)
 
-    m = MM.fromList $ m1 ++ m2
+    m = M.fromList $ m1 ++ m2
 
     m1 = [ ("InstitutionName",             institution)
          , ("InstitutionalDepartmentName", institutionalDepartmentName)
          , ("InstitutionAddress",          institutionAddress)
          ]
 
-    m2 = map (\o -> ("Operator", o)) defaultOperators
+    -- m2 = map (\o -> ("Operator", o)) defaultOperators
+    m2 = [("Operator", intercalate " " defaultOperators)]
 
 allJust :: [Maybe a] -> Maybe [a]
 allJust x = if all isJust x then Just (catMaybes x) else Nothing
@@ -442,9 +442,9 @@ identifyDataset schemaDataset datasetFields re files = let description = join (a
 
     experiments = [eiResourceURI re]
 
-    m           = MM.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
+    m           = M.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
 
-identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile
+identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile
 identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
                                         (dsiResourceURI rds)
                                         filepath
@@ -617,5 +617,3 @@ readInstrumentConfig cfg instrumentName = do
     toIdentifierTuple :: [String] -> (String, String)
     toIdentifierTuple [field, value] = (field, value)
     toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
-
-

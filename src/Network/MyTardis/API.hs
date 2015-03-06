@@ -38,7 +38,6 @@ import qualified Data.ByteString.Char8  as B8
 import qualified Data.Text as T
 import Text.Printf (printf)
 import qualified Data.Map as M
-import qualified Data.MultiMap as MM
 
 import Data.Dicom
 import Network.ImageTrove.Utils (computeChecksum)
@@ -193,7 +192,9 @@ getDatasetFiles uri = do
     getList $ dropIfPrefix apiBase $ uri ++ "files"
 
 -- | Create an experiment. If an experiment already exists in MyTARDIS that matches our
--- locally identified experiment, we just return the existing experiment.
+-- locally identified experiment, we just return the existing experiment. However,
+-- metadata of the existing experiment will be updated (this is to reflect changes
+-- in project IDs and operator lists).
 createExperiment :: IdentifiedExperiment -> ReaderT MyTardisConfig IO (Result RestExperiment)
 createExperiment ie@(IdentifiedExperiment description instutitionName title metadata) = do
     writeLog $ "createExperiment : " ++ show ie
@@ -201,6 +202,13 @@ createExperiment ie@(IdentifiedExperiment description instutitionName title meta
 
     case x of
         Right re        -> do writeLog "createExperiment: Found existing experiment."
+                              writeLog "createExperiment: Updating experiment's metadata."
+
+                              -- FIXME We assume that there is just one metadata schema
+                              -- (hence the concat at the front).
+                              let metadata' = concat $ map M.toList $ map snd metadata
+                              updateExperimentMetadata metadata' re
+
                               return $ Success re
         Left NoMatches  -> do writeLog "createExperiment: no matches, creating the experiment resource."
                               createResource "/experiment/" getExperiment m
@@ -236,11 +244,11 @@ createUser firstname lastname username groups isSuperuser = do
             ]
 
 -- | Construct a ParameterSet from a basic "String"/"String" map.
-mkParameterSet :: (String, MM.MultiMap String String) -- ^ Schema URL and key/value map.
+mkParameterSet :: (String, M.Map String String) -- ^ Schema URL and key/value map.
                -> Value                               -- ^ JSON value.
 mkParameterSet (schemaURL, mmap) = object
                                         [ ("schema",     String $ T.pack schemaURL)
-                                        , ("parameters", toJSON $ map mkParameter (MM.toList mmap))
+                                        , ("parameters", toJSON $ map mkParameter (M.toList mmap))
                                         ]
   where
     mkParameter :: (String, String) -> Value
@@ -415,6 +423,9 @@ getObjectACL = getResource
 
 getUser :: URI -> ReaderT MyTardisConfig IO (Result RestUser)
 getUser = getResource
+
+getParameter :: URI -> ReaderT MyTardisConfig IO (Result RestParameter)
+getParameter = getResource
 
 data MyTardisSchema = SchemaExperiment | SchemaDataset | SchemaDatasetFile | SchemaNone
 
@@ -604,6 +615,13 @@ deleteDatasetFile x = do
     MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsfResourceURI x
 
+-- | Delete a parameter.
+deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response ())
+deleteParameter x = do
+    writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
+    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
+    liftIO $ deleteWith opts $ host ++ epResourceURI x
+
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment
 restExperimentToIdentified rexpr = do
     metadata <- mapM handyParameterSet (eiParameterSets rexpr)
@@ -653,25 +671,26 @@ instance GeneralParameterSet RestDatasetFileParameterSet where
 -- | Get a parameterset in a handy (schema, dict) form.
 handyParameterSet :: GeneralParameterSet a
     => a  -- An instance of "GeneralParameterSet".
-    -> ReaderT MyTardisConfig IO (String, MM.MultiMap String String) -- Schema namespace and key/value map.
+    -> ReaderT MyTardisConfig IO (String, M.Map String String) -- Schema namespace and key/value map.
 handyParameterSet paramset = do
-    m <- (MM.fromList . catMaybes) <$> mapM getBoth (generalGetParameters paramset)
+    m <- (M.fromList . catMaybes) <$> mapM getBoth (generalGetParameters paramset)
     return (schema, m)
 
   where
 
     schema = schemaNamespace $ generalGetSchema paramset
 
-    getParName :: RestParameter -> ReaderT MyTardisConfig IO (Result String)
-    getParName eparam = fmap pnName <$> getParameterName (epName eparam)
+getBoth :: RestParameter -> ReaderT MyTardisConfig IO (Maybe (String, String))
+getBoth eparam = do
+    name <- getParName eparam
+    let value = epStringValue eparam
 
-    getBoth :: RestParameter -> ReaderT MyTardisConfig IO (Maybe (String, String))
-    getBoth eparam = do
-        name <- getParName eparam
-        let value = epStringValue eparam
+    case (name, value) of (Success name', Just value') -> return $ Just (name', value')
+                          _                            -> return Nothing
 
-        case (name, value) of (Success name', Just value') -> return $ Just (name', value')
-                              _                            -> return Nothing
+getParName :: RestParameter -> ReaderT MyTardisConfig IO (Result String)
+getParName eparam = fmap pnName <$> getParameterName (epName eparam)
+
 
 -- Get a user if they already exist (matching on the @username@) otherwise create the user.
 -- If a user already exists and they have @isSuperuser == False@ and we call this function
@@ -784,10 +803,10 @@ addGroupAccess canDelete canRead canWrite experiment group = do
 
 uploadFileBasic
     :: String
-    -> (RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile)
+    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile)
     -> RestDataset
     -> FilePath
-    -> [(String, MM.MultiMap String String)]
+    -> [(String, M.Map String String)]
     -> ReaderT MyTardisConfig IO (Result RestDatasetFile)
 uploadFileBasic schemaFile identifyDatasetFile d f m = do
     writeLog $ "uploadFileBasic: " ++ show (schemaFile, d, f, m)
@@ -878,7 +897,7 @@ uploadDicomAsMinc
          -> String
          -> String
          -> Integer
-         -> [(String, MM.MultiMap String String)]
+         -> [(String, M.Map String String)]
          -> IdentifiedFile)                 -- ^ Identify a file.
      -> FilePath                            -- ^ Directory containing DICOM files.
      -> (String, String, String, String, String, String, [String]) -- ^ Experiment schema, dataset schema, file schema, default institution name, default department name, default institution address, default operators.
@@ -918,7 +937,7 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
     d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
 
     let oneFile = headMay files
-        filemetadata = (\f -> [(schemaFile, MM.fromList
+        filemetadata = (\f -> [(schemaFile, M.fromList
                                                 [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
                                                 , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
                                                 , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
@@ -949,9 +968,9 @@ anyCatastrohpicErrors (_:fs)                        = anyCatastrohpicErrors fs
 
 finaliseMincFiles
     :: String   -- ^ Schema URL for files.
-    -> (RestDataset -> String -> String -> Integer -> [(String, MM.MultiMap String String)] -> IdentifiedFile) -- ^ Identify a dataset.
+    -> (RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile) -- ^ Identify a dataset.
     -> RestDataset  -- ^ Dataset that we are adding the file to.
-    -> [(String, MM.MultiMap String String)] -- ^ File metadata map.
+    -> [(String, M.Map String String)] -- ^ File metadata map.
     -> (FilePath, [FilePath])           -- ^ Temporary directory containing MINC files; list of MINC files in that directory.
     -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile))]
 finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFiles) = do
@@ -987,3 +1006,35 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFi
                          removeRecursiveSafely tempDir
 
     return stuff
+
+
+-- | Update an experiment parameter value.
+updateParameter ((name, value), rp) (name', value') = do
+    if name == name' && value /= value'
+        then do liftIO $ print (name, value, value')
+                updateResource (rp { epStringValue = Just value' }) epResourceURI getParameter
+                return ()
+        else return ()
+  
+updateExperimentMetadata :: [(String, String)] -> RestExperiment -> ReaderT MyTardisConfig IO ()
+updateExperimentMetadata newMetadata e = do
+    let parameterSets  = eiParameterSets e
+        restParameters = concat $ map epsParameters parameterSets
+
+    nameAndValues <- concat <$> mapM (\z -> (mapM getBoth) $ epsParameters z) parameterSets
+
+    let together = zip nameAndValues restParameters
+
+    let getNones (Nothing, rp) = [rp]
+        getNones _             = []
+
+    forM_ (concat $ map getNones together) $ \r -> do
+        liftIO $ putStrLn $ "Error: could not look up name for parameter: " ++ show r
+        liftIO $ putStrLn $ "Error: metadata for experiment " ++ (show $ eiID e) ++ " may be inaccurate!"
+
+    let getJusts (Just nv, rp) = [(nv, rp)]
+        getJusts (Nothing, _)  = []
+
+    forM_ newMetadata $ \newm -> do
+        forM_ (concat $ map getJusts together) $ \o -> do
+            updateParameter o newm

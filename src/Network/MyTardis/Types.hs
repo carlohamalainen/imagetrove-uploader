@@ -3,14 +3,7 @@
 module Network.MyTardis.Types where
 
 import qualified Data.Map as M
-import qualified Data.MultiMap as MM
 import System.FilePath.Posix (takeFileName)
-
-instance (Eq a, Eq b) => Eq (MM.MultiMap a b) where
-    m == n = MM.toMap m == MM.toMap n
-
-instance (Show a, Show b) => Show (MM.MultiMap a b) where
-    show m = show $ MM.toMap m
 
 -- | An experiment that has been identified on the local filesystem (e.g. a collection
 -- of DICOM files).
@@ -18,7 +11,7 @@ data IdentifiedExperiment = IdentifiedExperiment
     { ideDescription        :: String   -- ^ Experiment description.
     , ideInstitutionName    :: String   -- ^ Institution name.
     , ideTitle              :: String   -- ^ Experiment title.
-    , ideMetadataMaps       :: [(String, MM.MultiMap String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
+    , ideMetadataMaps       :: [(String, M.Map String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
     }
     deriving (Show)
 
@@ -29,7 +22,7 @@ instance Eq IdentifiedExperiment where
 data IdentifiedDataset = IdentifiedDataset
     { iddDescription        :: String   -- ^ Dataset description.
     , iddExperiments        :: [String] -- ^ List of experiment resource URIs.
-    , iddMetadataMaps       :: [(String, MM.MultiMap String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
+    , iddMetadataMaps       :: [(String, M.Map String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
     }
     deriving (Eq, Show)
 
@@ -39,7 +32,7 @@ data IdentifiedFile = IdentifiedFile
     , idfFilePath           :: String   -- ^ Full path to the file.
     , idfMd5sum             :: String   -- ^ Md5sum of the file.
     , idfSize               :: Integer  -- ^ Size of the file in bytes.
-    , idfMetadataMaps       :: [(String, MM.MultiMap String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
+    , idfMetadataMaps       :: [(String, M.Map String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
     }
     deriving (Show)
 
