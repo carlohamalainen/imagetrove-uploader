@@ -13,6 +13,6 @@ import Options.Applicative
 import Safe (headMay)
 import Text.Printf (printf)
 
-import Network.ImageTrove.Main
+import Network.ImageTrove.MainDicom
 
 main = imageTroveMain

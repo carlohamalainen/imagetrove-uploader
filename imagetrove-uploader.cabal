@@ -15,7 +15,8 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:   Data.Dicom
-                   , Network.ImageTrove.Main
+                   , Network.ImageTrove.MainBruker
+                   , Network.ImageTrove.MainDicom
                    , Network.ImageTrove.Utils
                    , Network.ImageTrove.Acid
                    , Network.MyTardis.API
