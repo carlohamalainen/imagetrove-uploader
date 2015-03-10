@@ -49,7 +49,7 @@ data RestExperiment = RestExperiment
     , eiURL             :: Maybe String
     , eiObjectACLs      :: [RestObjectACL]
     }
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 instance FromJSON RestExperiment where
     parseJSON (Object v) = RestExperiment <$>
@@ -102,7 +102,7 @@ data RestParameter = RestParameter
     , epResourceURI     :: String       -- ^ URI for this parameter, e.g. \"\/api\/v1\/experimentparameter\/33\/\"
     , epStringValue     :: Maybe String -- ^ String value.
     , epValue           :: Maybe String
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestParameter where
     parseJSON (Object v) = RestParameter <$>
@@ -133,7 +133,7 @@ data RestExperimentParameterSet = RestExperimentParameterSet
     , epsParameters         :: [RestParameter]  -- ^ List of parameters that are in this parameter set.
     , epsResourceURI        :: String           -- ^ Resource URI for this parameter set.
     , epsSchema             :: RestSchema       -- ^ Schema for this parameter set.
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestExperimentParameterSet where
     parseJSON (Object v) = RestExperimentParameterSet <$>
@@ -198,7 +198,7 @@ data RestSchema = RestSchema
     , schemaResourceURI :: String           -- ^ Resource URI for this schema.
     , schemaSubtype     :: Maybe String
     , schemaType        :: Integer          -- ^ Schema types, hard coded in the MyTARDIS source: EXPERIMENT = 1, DATASET = 2, DATAFILE = 3, NONE = 4.
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestSchema where
     parseJSON (Object v) = RestSchema <$>
@@ -237,7 +237,7 @@ data RestParameterName = RestParameterName
     , pnResourceURI         :: String
     , pnSchemaURL           :: String
     , pnUnits               :: Maybe String
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestParameterName where
     parseJSON (Object v) = RestParameterName <$>
@@ -340,7 +340,7 @@ data RestPermission = RestPermission
     , permID          :: Integer
     , permName        :: String
     , permResourceURI :: String
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestPermission where
     parseJSON (Object v) = RestPermission <$>
@@ -363,7 +363,7 @@ data RestGroup = RestGroup
     , groupName           :: String
     , groupPermissions    :: [RestPermission]
     , groupResourceURI    :: String
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestGroup where
     parseJSON (Object v) = RestGroup <$>
@@ -394,7 +394,7 @@ data RestObjectACL = RestObjectACL
     , objectPluginId    :: String -- ^ For example \"django_group\".
     , objectRelatedGroup   :: Maybe RestGroup
     , objectResourceURI     :: String
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 instance FromJSON RestObjectACL where
     parseJSON (Object v) = RestObjectACL <$>
