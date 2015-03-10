@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Network.ImageTrove.Main where
+module Network.ImageTrove.MainDicom where
 
 import Prelude hiding (lookup)
 
