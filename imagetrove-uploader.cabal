@@ -19,6 +19,7 @@ library
                    , Network.ImageTrove.MainDicom
                    , Network.ImageTrove.Utils
                    , Network.ImageTrove.Acid
+                   , Network.ImageTrove.Bruker
                    , Network.MyTardis.API
                    , Network.MyTardis.Instances
                    , Network.MyTardis.Types

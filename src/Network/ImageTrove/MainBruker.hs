@@ -29,21 +29,24 @@ import Network.MyTardis.RestTypes
 import Network.MyTardis.Types
 import Network.Orthanc.API
 
+import System.Posix.Files
 import System.IO
 
 import Control.Concurrent (threadDelay)
 
 import System.Unix.Directory (removeRecursiveSafely)
 
-import Data.Time.Clock (addUTCTime, diffUTCTime, UTCTime(..), NominalDiffTime(..))
+import Data.Time.Clock (addUTCTime, getCurrentTime, diffUTCTime, UTCTime(..), NominalDiffTime(..))
 import Data.Time.LocalTime (getZonedTime, utcToZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
-import System.Directory (getCurrentDirectory, setCurrentDirectory, createDirectoryIfMissing)
-import System.FilePath ((</>))
+import System.Directory
+import System.FilePath
 
 import Network.ImageTrove.Acid
+
+import Network.ImageTrove.Bruker
 
 import qualified Data.Map as Map
 
@@ -452,58 +455,6 @@ identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
                                         size
                                         metadata
 
-grabMetadata :: DicomFile -> [(String, String)]
-grabMetadata file = map oops $ concatMap f metadata
-
-  where
-
-    oops (x, y) = (y, x)
-
-    f :: (Maybe t, t) -> [(t, t)]
-    f (Just x,  desc) = [(x, desc)]
-    f (Nothing, _)    = []
-
-    metadata =
-        [ (dicomPatientName            file, "Patient Name")
-        , (dicomPatientID              file, "Patient ID")
-        , (dicomPatientBirthDate       file, "Patient Birth Date")
-        , (dicomPatientSex             file, "Patient Sex")
-        , (dicomPatientAge             file, "Patient Age")
-        , (dicomPatientWeight          file, "Patient Weight")
-        , (dicomPatientPosition        file, "Patient Position")
-
-        , (dicomStudyDate              file, "Study Date")
-        , (dicomStudyTime              file, "Study Time")
-        , (dicomStudyDescription       file, "Study Description")
-        -- , (dicomStudyInstanceID        file, "Study Instance ID")
-        , (dicomStudyID                file, "Study ID")
-
-        , (dicomSeriesDate             file, "Series Date")
-        , (dicomSeriesTime             file, "Series Time")
-        , (dicomSeriesDescription      file, "Series Description")
-        -- , (dicomSeriesInstanceUID      file, "Series Instance UID")
-        -- , (dicomSeriesNumber           file, "Series Number")
-        -- , (dicomCSASeriesHeaderType    file, "CSA Series Header Type")
-        -- , (dicomCSASeriesHeaderVersion file, "CSA Series Header Version")
-        -- , (dicomCSASeriesHeaderInfo    file, "CSA Series Header Info")
-        -- , (dicomSeriesWorkflowStatus   file, "Series Workflow Status")
-
-        -- , (dicomMediaStorageSOPInstanceUID file, "Media Storage SOP Instance UID")
-        -- , (dicomInstanceCreationDate       file, "Instance Creation Date")
-        -- , (dicomInstanceCreationTime       file, "Instance Creation Time")
-        -- , (dicomSOPInstanceUID             file, "SOP Instance UID")
-        -- , (dicomStudyInstanceUID           file, "Study Instance UID")
-        -- , (dicomInstanceNumber             file, "Instance Number")
-
-        , (dicomInstitutionName                file, "Institution Name")
-        , (dicomInstitutionAddress             file, "Institution Address")
-        , (dicomInstitutionalDepartmentName    file, "Institutional Department Name")
-
-        , (dicomReferringPhysicianName         file, "Referring Physician Name")
-        ]
-
-
-
 getConfig :: String -> String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
 getConfig host orthHost f defaultLogfile debug = do
     cfg <- load [Optional f]
@@ -617,3 +568,78 @@ readInstrumentConfig cfg instrumentName = do
     toIdentifierTuple :: [String] -> (String, String)
     toIdentifierTuple [field, value] = (field, value)
     toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
+
+-- | Is this a directory?
+isDir :: FilePath -> IO Bool
+isDir dir = isDirectory <$> getFileStatus dir
+
+-- | Get the contents of a directory.
+getStuff :: FilePath -> IO [FilePath]
+getStuff dir = map (dir </>) . filter (not . (`elem` [".", ".."])) <$> getDirectoryContents dir
+
+-- | Get directories in the directory.
+getDirs :: FilePath -> IO [FilePath]
+getDirs dir = getStuff dir >>= filterM isDir
+
+-- | Test if an *absolute* path is the top level of a Bruker experiment directory.
+isBrukerDirectory :: FilePath -> IO Bool
+isBrukerDirectory dir = do
+    hasSubject <- fileExist (dir </> "subject")
+    return $ isBrukerDirectoryName (last $ splitDirectories dir) && hasSubject
+
+-- Parse a project ID from a Bruker subject file.
+getProjectID :: FilePath -> IO (Maybe Integer)
+getProjectID dir = do
+    let s = dir </> "subject"
+
+    -- FIXME do something
+
+    return $ Just 10000
+
+isStable :: FilePath -> IO Bool
+isStable dir = undefined
+
+
+identifyBrukerExperiment :: String -> String -> String -> String -> [String] -> FilePath -> IO (Either String IdentifiedExperiment)
+identifyBrukerExperiment schemaExperiment institution institutionalDepartmentName institutionAddress operators dir = do
+    projectID <- getProjectID dir
+
+    case projectID of
+
+        Nothing         -> return $ Left $ "Error: could not find project ID in " ++ dir
+
+        Just projectID' -> do let m1 = [ ("InstitutionName",             institution)
+                                       , ("InstitutionalDepartmentName", institutionalDepartmentName)
+                                       , ("InstitutionAddress",          institutionAddress)
+                                       , ("Project",                     show projectID')
+                                       ]
+                                                 
+                                  m2 = [("Operator", intercalate " " operators)]
+                                                
+                                  m = M.fromList $ m1 ++ m2
+                                  
+                              return $ Right $ IdentifiedExperiment desc institution title [(schemaExperiment, m)]
+
+  where
+    desc            = "" -- FIXME What should this be?
+    title           = last $ splitDirectories dir
+
+_d = "/data/home/uqchamal/mounts/bio94t/opt/PV5.1/data/uqytesir"
+
+go = do
+
+    experimentDirs <- getDirs (_d </> "nmr") >>= filterM isBrukerDirectory
+
+    let experiment = head experimentDirs
+
+    print experiment
+
+
+
+
+
+
+
+
+
+
