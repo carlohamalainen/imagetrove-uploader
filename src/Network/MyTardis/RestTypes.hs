@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, DeriveDataTypeable #-}
 
 module Network.MyTardis.RestTypes where
 
@@ -6,6 +6,7 @@ import Prelude hiding (id)
 import Control.Applicative ((<$>), (<*>))
 import Control.Monad (mzero)
 import Data.Aeson
+import Data.Typeable
 
 data RestExperimentMeta = RestExperimentMeta
     { emLimit :: Integer
@@ -49,7 +50,7 @@ data RestExperiment = RestExperiment
     , eiURL             :: Maybe String
     , eiObjectACLs      :: [RestObjectACL]
     }
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Typeable)
 
 instance FromJSON RestExperiment where
     parseJSON (Object v) = RestExperiment <$>
