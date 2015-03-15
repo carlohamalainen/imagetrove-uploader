@@ -4,6 +4,8 @@ module Network.ImageTrove.MainBruker where
 
 import Prelude hiding (lookup)
 
+import Control.Exception.Base (catch, IOException(..))
+
 import Control.Monad.Reader
 import Control.Monad (forever, when)
 import Control.Concurrent (threadDelay)
@@ -14,13 +16,15 @@ import Data.Traversable (traverse)
 import Data.Either
 import qualified Data.Foldable as DF
 import Data.Maybe
-import Data.List (isPrefixOf, intercalate)
+import Data.List (isPrefixOf, isSuffixOf, intercalate)
 import qualified Data.Map as M
 import qualified Data.Aeson as A
 import qualified Data.Text as T
 import Options.Applicative
 import Safe (headMay)
 import Text.Printf (printf)
+
+import System.IO.Temp
 
 import Data.Dicom
 import Network.ImageTrove.Utils
@@ -39,6 +43,7 @@ import System.Unix.Directory (removeRecursiveSafely)
 import Data.Time.Clock (addUTCTime, getCurrentTime, diffUTCTime, UTCTime(..), NominalDiffTime(..))
 import Data.Time.LocalTime (getZonedTime, utcToZonedTime, zonedTimeToUTC, TimeZone(..), ZonedTime(..))
 import Data.Time.Format (parseTime)
+import Data.Time.Clock.POSIX
 import System.Locale (defaultTimeLocale)
 
 import System.Directory
@@ -50,26 +55,15 @@ import Network.ImageTrove.Bruker
 
 import qualified Data.Map as Map
 
-data Command
-    = CmdUploadAll       UploadAllOptions
-    | CmdUploadOne       UploadOneOptions
-    | CmdShowExperiments ShowExperimentsOptions
-    | CmdUploadFromDicomServer UploadFromDicomServerOptions
+import System.Unix.Directory (removeRecursiveSafely)
+
+data Command = CmdUploadAll UploadAllOptions
     deriving (Eq, Show)
 
-data UploadAllOptions = UploadAllOptions { uploadAllDryRun :: Bool } deriving (Eq, Show)
-
-data UploadOneOptions = UploadOneOptions { uploadOneHash :: String } deriving (Eq, Show)
-
-data ShowExperimentsOptions = ShowExperimentsOptions { showFileSets :: Bool } deriving (Eq, Show)
-
-data UploadFromDicomServerOptions = UploadFromDicomServerOptions { uploadFromDicomForever       :: Bool
-                                                                 , uploadFromDicomSleepMinutes  :: Int
-                                                                 } deriving (Eq, Show)
+data UploadAllOptions = UploadAllOptions deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
-    { optDirectory      :: Maybe FilePath
-    , optHost           :: Maybe String
+    { optHost           :: Maybe String
     , optConfigFile     :: FilePath
     , optDebug          :: Bool
     , optCommand        :: Command
@@ -77,394 +71,25 @@ data UploaderOptions = UploaderOptions
     deriving (Eq, Show)
 
 pUploadAllOptions :: Parser Command
-pUploadAllOptions = CmdUploadAll <$> UploadAllOptions <$> switch (long "dry-run" <> help "Dry run.")
-
-pUploadOneOptions :: Parser Command
-pUploadOneOptions = CmdUploadOne <$> UploadOneOptions <$> strOption (long "hash" <> help "Hash of experiment to upload.")
-
-pShowExprOptions :: Parser Command
-pShowExprOptions = CmdShowExperiments <$> ShowExperimentsOptions <$> switch (long "show-file-sets" <> help "Show experiments.")
-
-pUploadFromDicomServerOptions :: Parser Command
-pUploadFromDicomServerOptions = CmdUploadFromDicomServer <$> (UploadFromDicomServerOptions <$> switch (long "upload-forever" <> help "Run forever with sleep between uploads.")
-                                                                                           <*> option auto (long "sleep-minutes"  <> help "Number of minutes to sleep between uploads."))
+pUploadAllOptions = CmdUploadAll <$> (pure UploadAllOptions)
 
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
-    <$> optional (strOption (long "input-dir"     <> metavar "DIRECTORY" <> help "Directory with DICOM files."))
-    <*> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
+    <$> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
     <*>          (strOption (long "config"        <> metavar "CONFIG"    <> help "Configuration file."))
     <*>          (switch    (long "debug"                                <> help "Debug mode."))
     <*> subparser x
   where
-    -- x    = cmd1 <> cmd2 <> cmd3 <> cmd4
-    -- FIXME For the moment just do DICOM server stuff.
-    x    = cmd4
+    x    = cmd1
     cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
-    cmd2 = command "upload-one"               (info (helper <*> pUploadOneOptions) (progDesc "Upload a single experiment."))
-    cmd3 = command "show-experiments"         (info (helper <*> pShowExprOptions)  (progDesc "Show local experiments."))
-    cmd4 = command "upload-from-dicom-server" (info (helper <*> pUploadFromDicomServerOptions) (progDesc "Upload from DICOM server."))
 
-getDicomDir :: UploaderOptions -> FilePath
-getDicomDir opts = fromMaybe "." (optDirectory opts)
-
-hashFiles :: [FilePath] -> String
-hashFiles = sha256 . unwords
-
-createProjectGroup linksDir = do
-    projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
-
-    case projectID of A.Success projectID' -> do projectResult <- getOrCreateGroup $ "Project " ++ projectID'
-                                                 case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created project group: " ++ projectID'
-                                                                       A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating project group: " ++ projErr
-                      A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve Project ID from ReferringPhysician field: " ++ err
-
-uploadAllAction opts = do
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
-
--- | Orthanc returns the date/time but has no timezone so append tz here:
-getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
-getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
-
-patientsToProcess :: FilePath 
-                  -> [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-                  -> [(String, Maybe ZonedTime)]
-                  -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-patientsToProcess fp ogroups hashAndLastUpdated = do
-    m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
-
-    let blah = zip ogroups hashAndLastUpdated
-
-    return $ map fst $ filter (f m) blah
-
-  where
-    f m (_, (h, Just lu)) = case M.lookup h m of
-                                Nothing                 -> True -- hash is not in the map
-                                Just Nothing            -> True -- hash is in the map but no ZonedTime available (perhaps due to parse error from Orthanc's LastUpdate field?)
-                                Just (Just luPrevious)  -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu  -- hash and LastUpdate in map, compare to see if current update time is newer.
-    f m (_, (h, Nothing)) = True
-
-uploadDicomAction opts origDir = do
-    -- Timezone:
-    ZonedTime _ tz <- liftIO getZonedTime
-
-    debug <- mytardisDebug <$> ask
-
-    cwd <- liftIO getCurrentDirectory
-
-    let slashToUnderscore = map (\c -> if c == '/' then '_' else c)
-
-    let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
-    liftIO $ createDirectoryIfMissing True fp
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    forM_ instrumentConfigs $ \( instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators) -> do
-            _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
-
-            case _ogroups of Left err -> undefined
-                             Right ogroups -> do 
-                                                 let -- Times that available patients have been updated:
-                                                     updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe ZonedTime]
-
-                                                     -- Hash of each:
-                                                     hashes = map (\(p, _, _, _, _) -> opID p) ogroups
-
-                                                     -- Together:
-                                                     hashAndLastUpdated = zip hashes updatedTimes
-
-                                                 recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
-                                                 liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
-
-                                                 forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
-                                                     Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
-
-                                                     liftIO $ print (tempDir, zipfile)
-
-                                                     Right linksDir <- liftIO $ unpackArchive tempDir zipfile
-                                                     liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
-
-                                                     createProjectGroup linksDir
-
-                                                     files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
-
-                                                     oneGroupResult <- uploadDicomAsMincOneGroup
-                                                         files
-                                                         instrumentFilters
-                                                         instrumentMetadataFields
-                                                         experimentFields
-                                                         datasetFields
-                                                         identifyExperiment
-                                                         identifyDataset
-                                                         identifyDatasetFile
-                                                         linksDir
-                                                         ( schemaExperiment
-                                                         , schemaDataset
-                                                         , schemaDicomFile
-                                                         , defaultInstitutionName
-                                                         , defaultInstitutionalDepartmentName
-                                                         , defaultInstitutionalAddress
-                                                         , defaultOperators)
-
-                                                     let schemaFile = schemaDicomFile -- FIXME
-
-                                                     case oneGroupResult of
-                                                         (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
-                                                                 zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
-
-                                                                 case zipfile' of
-                                                                     A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
-                                                                                                          putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                                                          removeRecursiveSafely tempDir
-                                                                                                          putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                                                          removeRecursiveSafely linksDir
-                                                                                                          updateLastUpdate fp (opID patient) (getPatientLastUpdate tz patient)
-                                                                     A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                                                                          if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                                                                                           putStrLn $ "Not deleting links directory: " ++ linksDir
-                                                                                                                   else do putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                                                                           removeRecursiveSafely tempDir
-                                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                                                                           removeRecursiveSafely linksDir
-
-                                                                 liftIO $ print zipfile'
-                                                         (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
-                                                         (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
-                                                         (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
-
-    -- liftIO $ setCurrentDirectory origDir
-    -- liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
-    -- liftIO $ setLastRunTime nowZoned
-
-dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
-
-dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
-    let dir = getDicomDir opts
-
-    -- FIXME let user specify glob
-    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
-    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
-    let _files = _files1 ++ _files2
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    forM_ instrumentConfigs $ \( instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
-                                                                    forM_ groups $ \files -> do
-                                                                        let
-                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files
-                                                                            hash = (sha256 . unwords) (map dicomFilePath files)
-
-                                                                        liftIO $ if showFileSets cmdShow
-                                                                            then printf "%s [%s] [%s] [%s] [%s]\n" hash institution desc title (unwords $ map dicomFilePath files)
-                                                                            else printf "%s [%s] [%s] [%s]\n"      hash institution desc title
-
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
-    let hash = uploadOneHash oneOpts
-
-    let dir = getDicomDir opts
-
-    -- FIXME let user specify glob
-    _files1 <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" dir >>= mapM readDicomMetadata)
-    _files2 <- liftIO $ rights <$> (getDicomFilesInDirectory ".IMA" dir >>= mapM readDicomMetadata)
-    let _files = _files1 ++ _files2
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators) -> groupDicomFiles instrumentFilters experimentFields datasetFields _files
-
-    let
-        hashes = map (hashFiles . fmap dicomFilePath) groups :: [String]
-        matches = filter ((==) hash . snd) (zip groups hashes) :: [([DicomFile], String)]
-
-    case matches of [match] -> liftIO $ print match
-                    []      -> liftIO $ putStrLn "Hash does not match any identified experiment."
-                    _       -> error "Multiple experiments with the same hash. This is a bug."
-
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadAll allOpts)) = do
-    uploadAllAction opts
-
-dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
-    if uploadFromDicomForever dicomOpts
-        then do origDir <- liftIO getCurrentDirectory
-                forever $ do liftIO $ setCurrentDirectory origDir
-                             uploadDicomAction opts origDir
-                             let sleepMinutes = uploadFromDicomSleepMinutes dicomOpts
-                             liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
-                             liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
-        else do origDir <- liftIO getCurrentDirectory
-                uploadDicomAction opts origDir
-
-imageTroveMain :: IO ()
-imageTroveMain = do
-    opts' <- execParser opts
-
-    let host = fromMaybe "http://localhost:8000" $ optHost opts'
-        f    = optConfigFile opts'
-        orthHost = "http://localhost:8043"
-        debug    = optDebug opts'
-
-    mytardisOpts <- getConfig host orthHost f Nothing debug
-
-    case mytardisOpts of
-        (Just mytardisOpts') -> runReaderT (dostuff opts') mytardisOpts'
-        _                    -> error $ "Could not read config file: " ++ f
-
-  where
-
-    opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-uploader - upload DICOM files to a MyTARDIS server" )
-
-caiProjectID :: [DicomFile] -> A.Result String
-caiProjectID files = let oneFile = headMay files in
-    case oneFile of
-        Nothing   -> A.Error "No DICOM files; can't determine CAI Project ID."
-        Just file -> case dicomReferringPhysicianName file of
-                        Nothing     -> A.Error "Referring Physician Name field is empty; can't determine CAI Project ID."
-                        Just rphys  -> if is5digits rphys
-                                            then A.Success rphys
-                                            else A.Error   $ "Referring Physician Name is not a 5 digit number: " ++ rphys
-
-  where
-
-    is5digits :: String -> Bool
-    is5digits s = (length s == 5) && (isJust $ (readMaybe s :: Maybe Integer))
-
-    readMaybe :: (Read a) => String -> Maybe a
-    readMaybe s =
-      case reads s of
-          [(a, "")] -> Just a
-          _         -> Nothing
-
-identifyExperiment
-    :: String
-    -> String
-    -> String
-    -> String
-    -> [String]
-    -> [DicomFile -> Maybe String]
-    -> [DicomFile -> Maybe String]
-    -> [DicomFile]
-    -> Maybe IdentifiedExperiment
-identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators titleFields instrumentFields files = do
-    let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
-        _title = ((\f -> titleFields <*> [f]) <$> oneFile)
-
-    when (isNothing instrument) $ error $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile
-
-    let m' = M.insert "Instrument" (fromJust instrument) m
-
-    let m'' = case caiProjectID files of
-                        A.Success caiID -> M.insert "Project" ("Project " ++ caiID) m'
-                        A.Error _       -> m'
-
-    case title of
-        Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
-        Just title' -> Just $ IdentifiedExperiment
-                                description
-                                institution
-                                (intercalate "/" title')
-                                [(schemaExperiment, m'')]
-  where
-    oneFile = headMay files
-
-    patientName       = join $ dicomPatientName       <$> oneFile
-    studyDescription  = join $ dicomStudyDescription  <$> oneFile
-    seriesDescription = join $ dicomSeriesDescription <$> oneFile
-
-    description = "" -- FIXME What should this be?
-
-    -- institution = fromMaybe defaultInstitutionName $ join $ dicomInstitutionName <$> oneFile
-    -- The InstitutionName field is missing for the Phoenix Zip Report and this results in two
-    -- different experiments being created in MyTARDIS. So set the institution to be whatever's in the
-    -- config file. Unlikely that a single config file will be run for multiple institutions?
-    institution = defaultInstitutionName
-
-    institutionalDepartmentName = defaultInstitutionalDepartmentName -- FIXME fromMaybe defaultInstitutionalDepartmentName $ join $ dicomInstitutionName    <$> oneFile
-    -- institutionAddress          = fromMaybe defaultInstitutionalAddress        $ join $ dicomInstitutionAddress <$> oneFile
-    institutionAddress          = defaultInstitutionalAddress
-
-    instrument = (intercalate " ") <$> join (allJust <$> (\f -> instrumentFields <*> [f]) <$> oneFile)
-
-    m = M.fromList $ m1 ++ m2
-
-    m1 = [ ("InstitutionName",             institution)
-         , ("InstitutionalDepartmentName", institutionalDepartmentName)
-         , ("InstitutionAddress",          institutionAddress)
-         ]
-
-    -- m2 = map (\o -> ("Operator", o)) defaultOperators
-    m2 = [("Operator", intercalate " " defaultOperators)]
-
-allJust :: [Maybe a] -> Maybe [a]
-allJust x = if all isJust x then Just (catMaybes x) else Nothing
-
-identifyDataset :: String -> [DicomFile -> Maybe String] -> RestExperiment -> [DicomFile] -> Maybe IdentifiedDataset
-identifyDataset schemaDataset datasetFields re files = let description = join (allJust <$> (\f -> datasetFields <*> [f]) <$> oneFile) in
-    case description of
-        Nothing           -> Nothing
-        Just description' -> Just $ IdentifiedDataset
-                                        (intercalate "/" description')
-                                        experiments
-                                        [(schemaDataset, m)]
-  where
-    oneFile = headMay files
-
-    experiments = [eiResourceURI re]
-
-    m           = M.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
-
-identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile
-identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
-                                        (dsiResourceURI rds)
-                                        filepath
-                                        md5sum
-                                        size
-                                        metadata
-
-getConfig :: String -> String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
-getConfig host orthHost f defaultLogfile debug = do
+getConfig :: String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
+getConfig host f defaultLogfile debug = do
     cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
     logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
-
-    ohost <- lookup cfg "orthanc_host" :: IO (Maybe String)
-    let ohost' = if isNothing ohost then orthHost else fromJust ohost
 
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
@@ -477,18 +102,12 @@ getConfig host orthHost f defaultLogfile debug = do
                   logfile'
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost' mytardisDir' debug
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h "http://127.0.0.1:8443" mytardisDir' debug
         _                        -> Nothing
 
 readInstrumentConfigs
   :: FilePath
-     -> IO
-          [([DicomFile -> Bool],
-            [(String, String)],
-            [DicomFile -> Maybe String],
-            [DicomFile -> Maybe String],
-            [DicomFile -> Maybe String],
-            String, String, String, String, String, String, [String])]
+     -> IO [(String, Maybe String, String, [String], String, String, String, String, String, String, FilePath)]
 readInstrumentConfigs f = do
     cfg <- load [Required f]
 
@@ -501,145 +120,506 @@ readInstrumentConfigs f = do
 readInstrumentConfig
   :: Config
        -> T.Text
-       -> IO
-            ([DicomFile -> Bool],
-             [(String, String)],
-             [DicomFile -> Maybe String],
-             [DicomFile -> Maybe String],
-             [DicomFile -> Maybe String],
-             String, String, String, String, String, String, [String])
+       -> IO (String, Maybe String, String, [String], String, String, String, String, String, String, FilePath)
 readInstrumentConfig cfg instrumentName = do
-    instrumentFields <- liftM (map toIdentifierFn)    <$> lookup cfg (instrumentName `T.append` ".instrument")
-    instrumentFieldsT<- liftM (map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
-    experimentFields <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".experiment_title")
-    datasetFields    <- liftM (map fieldToFn)         <$> lookup cfg (instrumentName `T.append` ".dataset_title")
+    topLevelDirectory                   <- lookup cfg (instrumentName `T.append` ".top_level_directory")
+    subdirectory                        <- lookup cfg (instrumentName `T.append` ".subdirectory")
+    processedDirectory                  <- lookup cfg (instrumentName `T.append` ".processed_directory")
 
-    -- TODO merge these together
-    instrumentMetadataFields0 <- liftM (map $ \x -> fieldToFn <$> headMay x) <$> lookup cfg (instrumentName `T.append` ".instrument")
-    let instrumentMetadataFields = join $ allJust <$> instrumentMetadataFields0
-
-    schemaExperiment <- lookup cfg (instrumentName `T.append` ".schema_experiment")
-    schemaDataset    <- lookup cfg (instrumentName `T.append` ".schema_dataset")
-    schemaFile       <- lookup cfg (instrumentName `T.append` ".schema_file")
+    defaultOperators                    <- lookup cfg (instrumentName `T.append` ".default_operators")
 
     defaultInstitutionName              <- lookup cfg (instrumentName `T.append` ".default_institution_name")
     defaultInstitutionalDepartmentName  <- lookup cfg (instrumentName `T.append` ".default_institutional_department_name")
     defaultInstitutionalAddress         <- lookup cfg (instrumentName `T.append` ".default_institutional_address")
 
-    defaultOperators                    <- lookup cfg (instrumentName `T.append` ".default_operators")
+    schemaExperiment <- lookup cfg (instrumentName `T.append` ".schema_experiment")
+    schemaDataset    <- lookup cfg (instrumentName `T.append` ".schema_dataset")
+    schemaFile       <- lookup cfg (instrumentName `T.append` ".schema_file")
 
-    when (isNothing instrumentFields) $ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
-    when (isNothing instrumentFieldsT)$ error $ "Bad/missing 'instrument' field for "       ++ T.unpack instrumentName
-    when (isNothing experimentFields) $ error $ "Bad/missing 'experiment_title' field for " ++ T.unpack instrumentName
-    when (isNothing datasetFields)    $ error $ "Bad/missing 'dataset_title' field for "    ++ T.unpack instrumentName
+    tempDirectory    <- fromMaybe "/tmp" <$> lookup cfg (instrumentName `T.append` ".temp_directory")
 
-    when (isNothing schemaExperiment) $ error $ "Bad/missing 'schema_experiment' field for " ++ T.unpack instrumentName
-    when (isNothing schemaDataset)    $ error $ "Bad/missing 'schema_dataset' field for "    ++ T.unpack instrumentName
-    when (isNothing schemaFile)       $ error $ "Bad/missing 'schema_file' field for "       ++ T.unpack instrumentName
+    when (isNothing topLevelDirectory)  $ error $ "Bad/missing 'top_level_directory' field for "       ++ T.unpack instrumentName
+    when (isNothing processedDirectory) $ error $ "Bad/missing 'processed_directory' field for "       ++ T.unpack instrumentName
+
+    when (isNothing defaultOperators)                    $ error $ "Bad/missing 'default_operators"                     ++ T.unpack instrumentName
 
     when (isNothing defaultInstitutionName)              $ error $ "Bad/missing 'default_institution_name"              ++ T.unpack instrumentName
     when (isNothing defaultInstitutionalDepartmentName)  $ error $ "Bad/missing 'default_institutional_department_name" ++ T.unpack instrumentName
     when (isNothing defaultInstitutionalAddress)         $ error $ "Bad/missing 'default_institutional_address"         ++ T.unpack instrumentName
 
-    when (isNothing defaultOperators)                    $ error $ "Bad/missing 'default_operators"                     ++ T.unpack instrumentName
+    when (isNothing schemaExperiment) $ error $ "Bad/missing 'schema_experiment' field for " ++ T.unpack instrumentName
+    when (isNothing schemaDataset)    $ error $ "Bad/missing 'schema_dataset' field for "    ++ T.unpack instrumentName
+    when (isNothing schemaFile)       $ error $ "Bad/missing 'schema_file' field for "       ++ T.unpack instrumentName
 
-    case ( instrumentFields
-         , instrumentFieldsT
-         , instrumentMetadataFields
-         , experimentFields
-         , datasetFields
-         , schemaExperiment
-         , schemaDataset
-         , schemaFile
-         , defaultInstitutionName
-         , defaultInstitutionalDepartmentName
-         , defaultInstitutionalAddress
-         , defaultOperators
-         ) of
-        (Just instrumentFields', Just instrumentFieldsT', Just instrumentMetadataFields', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (instrumentFields', instrumentFieldsT', instrumentMetadataFields', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
+    case ( topLevelDirectory, processedDirectory, defaultOperators , defaultInstitutionName , defaultInstitutionalDepartmentName , defaultInstitutionalAddress , schemaExperiment , schemaDataset , schemaFile) of
+        ( Just topLevelDirectory', Just processedDirectory', Just defaultOperators' , Just defaultInstitutionName' , Just defaultInstitutionalDepartmentName' , Just defaultInstitutionalAddress' , Just schemaExperiment' , Just schemaDataset' , Just schemaFile') -> return (topLevelDirectory', subdirectory, processedDirectory', defaultOperators', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', schemaExperiment', schemaDataset', schemaFile', tempDirectory)
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
-
-  where
-
-    toIdentifierFn :: [String] -> DicomFile -> Bool
-    toIdentifierFn [field, value] = tupleToIdentifierFn (field, value)
-    toIdentifierFn x = error $ "Error: toIdentifierFn: too many items specified: " ++ show x
-
-    toIdentifierTuple :: [String] -> (String, String)
-    toIdentifierTuple [field, value] = (field, value)
-    toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
 
 -- | Is this a directory?
 isDir :: FilePath -> IO Bool
 isDir dir = isDirectory <$> getFileStatus dir
 
 -- | Get the contents of a directory.
-getStuff :: FilePath -> IO [FilePath]
-getStuff dir = map (dir </>) . filter (not . (`elem` [".", ".."])) <$> getDirectoryContents dir
+getStuff :: FilePath -> IO (Either String [FilePath])
+getStuff dir = catch (Right . map (dir </>) . filter (not . (`elem` [".", ".."])) <$> getDirectoryContents dir)
+                     (\e -> return $ Left $ show (e :: IOException))
 
 -- | Get directories in the directory.
-getDirs :: FilePath -> IO [FilePath]
-getDirs dir = getStuff dir >>= filterM isDir
+getDirs :: FilePath -> IO (Either String [FilePath])
+getDirs dir = do
+    stuff <- getStuff dir
+    case stuff of Right stuffs -> filterM isDir stuffs >>= (return . Right)
+                  Left err     -> return $ Left err
 
 -- | Test if an *absolute* path is the top level of a Bruker experiment directory.
 isBrukerDirectory :: FilePath -> IO Bool
-isBrukerDirectory dir = do
-    hasSubject <- fileExist (dir </> "subject")
-    return $ isBrukerDirectoryName (last $ splitDirectories dir) && hasSubject
+isBrukerDirectory dir = fileExist (dir </> "subject")
 
--- Parse a project ID from a Bruker subject file.
-getProjectID :: FilePath -> IO (Maybe Integer)
-getProjectID dir = do
-    let s = dir </> "subject"
+-- | A directory is considered stable if it hasn't been accessed or modified
+-- for at least 5 minutes.
+isStable :: FilePath -> IO (Either String Bool)
+isStable dir = catch (Right <$> isStable' dir)
+                     (\e -> return $ Left $ show (e :: IOException))
+  where
+    isStable' dir = do
+        now        <- getCurrentTime
+        lastChange <- getLastChangedTime dir
 
-    -- FIXME do something
+        let diff = diffUTCTime now lastChange
 
-    return $ Just 10000
-
-isStable :: FilePath -> IO Bool
-isStable dir = undefined
-
+        return $ diff > (5*60)
 
 identifyBrukerExperiment :: String -> String -> String -> String -> [String] -> FilePath -> IO (Either String IdentifiedExperiment)
 identifyBrukerExperiment schemaExperiment institution institutionalDepartmentName institutionAddress operators dir = do
-    projectID <- getProjectID dir
+    projectID <- readProjectID dir
 
     case projectID of
 
-        Nothing         -> return $ Left $ "Error: could not find project ID in " ++ dir
+        Left pidErr     -> return $ Left $ "Error: could not find project ID in " ++ dir ++ "; " ++ pidErr
 
-        Just projectID' -> do let m1 = [ ("InstitutionName",             institution)
-                                       , ("InstitutionalDepartmentName", institutionalDepartmentName)
-                                       , ("InstitutionAddress",          institutionAddress)
-                                       , ("Project",                     show projectID')
-                                       ]
-                                                 
-                                  m2 = [("Operator", intercalate " " operators)]
-                                                
-                                  m = M.fromList $ m1 ++ m2
-                                  
-                              return $ Right $ IdentifiedExperiment desc institution title [(schemaExperiment, m)]
+        Right projectID' -> do let m1 = [ ("InstitutionName",             institution)
+                                        , ("InstitutionalDepartmentName", institutionalDepartmentName)
+                                        , ("InstitutionAddress",          institutionAddress)
+                                        , ("Project",                     show projectID')
+                                        ]
+
+                                   m2 = [("Operator", intercalate " " operators)]
+
+                                   m = M.fromList $ m1 ++ m2
+
+                               return $ Right $ IdentifiedExperiment desc institution title [(schemaExperiment, m)]
 
   where
     desc            = "" -- FIXME What should this be?
     title           = last $ splitDirectories dir
 
-_d = "/data/home/uqchamal/mounts/bio94t/opt/PV5.1/data/uqytesir"
+getLastChangedTime :: FilePath -> IO UTCTime
+getLastChangedTime x = do
+    stat <- getFileStatus x
 
-go = do
+    let ctimeToUTC = \t -> posixSecondsToUTCTime (realToFrac t :: POSIXTime)
 
-    experimentDirs <- getDirs (_d </> "nmr") >>= filterM isBrukerDirectory
+    let atime = ctimeToUTC $ accessTime       stat
+        mtime = ctimeToUTC $ modificationTime stat
 
-    let experiment = head experimentDirs
+    return $ max atime mtime
 
-    print experiment
+tarBrukerDirectory :: FilePath -> FilePath -> IO (Either String FilePath)
+tarBrukerDirectory tempDir dir = do
+    let up      = joinPath . reverse . tail . reverse . splitDirectories $ dir -- FIXME Can break.
+        title   = last $ splitDirectories dir                                  -- FIXME last is dangerous if empty path
+
+    oldCwd <- getCurrentDirectory
+
+    print ("up", up)
+    print ("title", title)
+
+    setCurrentDirectory up -- FIXME catch exception?
+
+    let tarball = tempDir </> (title ++ ".tar.gz")
+
+    let cmd     = "tar"
+        args    = ["zcf", tarball, title]
+
+    putStrLn $ "Running: " ++ show (cmd, args)
+    tarballResult <- runShellCommand cmd args
+
+    setCurrentDirectory oldCwd
+
+    case tarballResult of
+        Left err    -> return $ Left $ "Error while creating tarball of " ++ dir ++ ": " ++ err
+        Right _     -> return $ Right tarball
+
+pvconvScript = "/data/home/uqchamal/perl5/bin/pvconv.pl" -- FIXME make parameter? Why is the path broken?
+
+brukerToMinc :: FilePath -> FilePath -> IO FilePath
+brukerToMinc tempDir dir = do
+    let up      = joinPath . reverse . tail . reverse . splitDirectories $ dir -- FIXME Can break.
+        title   = last $ splitDirectories dir                                  -- FIXME last is dangerous if empty path
+
+    oldCwd <- getCurrentDirectory
+
+    print ("up", up)
+    print ("title", title)
+
+    setCurrentDirectory up -- FIXME catch exception?
+
+    let cmd     = pvconvScript
+        args    = [title, "-verbose", "-all", "-outtype", "minc", "-outdir", tempDir]
+
+    putStrLn $ "Running: " ++ show (cmd, args)
+    _ <- runShellCommand' cmd args
+
+    setCurrentDirectory oldCwd
+
+    return tempDir
+
+mincFilesInDir :: FilePath -> IO [FilePath]
+mincFilesInDir dir = getDirectoryContents dir >>= (return . (map (dir </>)) . filter (isSuffixOf ".mnc"))
+
+-- copied from MainDicom.hs
+identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile
+identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
+                                        (dsiResourceURI rds)
+                                        filepath
+                                        md5sum
+                                        size
+                                        metadata
+
+pushFiles :: String -> (RestDataset -> String -> String -> Integer -> [(String, Map.Map String String)] -> IdentifiedFile) -> RestDataset -> [FilePath] -> ReaderT MyTardisConfig IO (Either [(FilePath, A.Result RestDatasetFile)] [(FilePath, A.Result RestDatasetFile)])
+pushFiles schemaFile identifyDatasetFile ds' files = do
+    results <- forM files $ \f -> uploadFileBasic schemaFile identifyDatasetFile ds' f []
+
+    let filesAndResults = zip files results
+
+        goodUpload (_, A.Success _) = True
+        goodUpload _                = False
+
+        goodUploads = filter goodUpload         filesAndResults
+        badUploads  = filter (not . goodUpload) filesAndResults
+
+    return $ case badUploads of
+        []  -> Right $ goodUploads -- no bad uploads
+        _   -> Left $ badUploads   -- some failed uploads
+
+data BrukerUploadError = BrukerTarballError             String
+                       | BrukerIdentifyError            String
+                       | BrukerCreateExperimentError    String
+                       | BrukerCreateDatasetError       String
+                       | BrukerCreateFilesError         [(FilePath, A.Result RestDatasetFile)]
+                       | BrukerCreateProjectGroupError  String
+                       | BrukerNoProjectID              String
+                       | BrukerFileSuccess              [(FilePath, A.Result RestDatasetFile)]
+                       deriving (Show)
+
+-- Parse the project ID.
+stage1 :: FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError String)
+stage1 dir = do
+    projectID <- liftIO $ readProjectID dir
+
+    return $ case projectID of
+       Left  pidErr     -> Left  $ BrukerNoProjectID pidErr
+       Right projectID' -> Right $ projectID'
+
+-- Create the project group.
+stage2 :: String -> ReaderT MyTardisConfig IO (Either BrukerUploadError RestGroup)
+stage2 projectID' = do
+    projectResult <- getOrCreateGroup $ "Project " ++ projectID'
+    return $ case projectResult of
+        A.Error   projErr       -> Left  $ BrukerCreateProjectGroupError projErr
+        A.Success projResult'   -> Right $ projResult'
+
+-- Make tarball of Bruker experiment directory.
+stage3 :: FilePath -> String -> String -> String -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError FilePath)
+stage3 tarballTempDir schemaExperiment schemaDataset schemaFile dir = do
+    tarball <- liftIO $ tarBrukerDirectory tarballTempDir dir
+
+    return $ case tarball of
+        Left err        -> Left  $ BrukerTarballError err
+        Right tarball'  -> Right $ tarball'
+
+-- Convert to MINC files.
+stage3a :: FilePath -> String -> String -> String -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError [FilePath])
+stage3a mincTempDir schemaExperiment schemaDataset schemaFile dir = do
+    mincDir     <- liftIO $ brukerToMinc mincTempDir dir
+    mincFiles   <- liftIO $ mincFilesInDir mincDir
+    return $ Right mincFiles
+
+-- Create thumbnails of MINC files.
+stage3b mincFiles = do
+    thumbnails <- liftIO $ forM mincFiles createMincThumbnail
+
+    -- We don't mind if thumbnails fail...
+    forM_ (lefts thumbnails) $ \terr -> liftIO $ putStrLn $ "Error when creating thumbnail: " ++ terr
+
+    return $ Right $ rights thumbnails
+
+-- Identify the experiment (preparation for creating an actual experiment).
+stage4 :: String -> String -> String -> String -> [String] -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError IdentifiedExperiment)
+stage4 schemaExperiment institution institutionalDepartmentName institutionAddress operators dir = do
+    ie <- liftIO $ identifyBrukerExperiment schemaExperiment institution institutionalDepartmentName institutionAddress operators dir
+
+    return $ case ie of
+      Left ieErr    -> Left  $ BrukerIdentifyError ieErr
+      Right ie'     -> Right $ ie'
+
+-- Create the experiment.
+stage5 :: IdentifiedExperiment -> ReaderT MyTardisConfig IO (Either BrukerUploadError RestExperiment)
+stage5 ie' = do
+    e <- createExperiment ie'
+    return $ case e of
+        A.Error   eerr  -> Left  $ BrukerCreateExperimentError eerr
+        A.Success e'    -> Right $ e'
+
+-- Identify the dataset.
+stage6 :: String -> RestExperiment -> ReaderT MyTardisConfig IO (Either BrukerUploadError RestDataset)
+stage6 schemaDataset e' = do
+    let ids = IdentifiedDataset
+                "Bruker dataset"
+                [eiResourceURI e']
+                [(schemaDataset, Map.empty)]
+    ds <- createDataset ids
+
+    return $ case ds of
+        A.Error   derr  -> Left  $ BrukerCreateDatasetError derr
+        A.Success ds'   -> Right $ ds'
+
+-- Push all the files (tarball, mincs, thumbnails).
+stage7 :: String -> [FilePath] -> RestDataset -> ReaderT MyTardisConfig IO (Either BrukerUploadError [(FilePath, A.Result RestDatasetFile)])
+stage7 schemaFile files ds' = do
+    fileResults <- pushFiles schemaFile identifyDatasetFile ds' files
+    return $ case fileResults of
+        Right fileResults' -> Right $ fileResults'
+        Left  fileErrors   -> Left  $ BrukerCreateFilesError fileErrors
+
+joinEither :: Either a (Either a b) -> Either a b
+joinEither (Left a)          = Left a
+joinEither (Right (Right b)) = Right b
+joinEither (Right (Left  a)) = Left a
+
+removeRecursively :: FilePath -> IO (Either String FilePath)
+removeRecursively dir = catch (removeRecursiveSafely dir >> return (Right dir))
+                              (\e -> return $ Left $ show (e :: IOException))
+
+-- FIXME expects absolute paths?
+safeMove :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+safeMove topDir dir destination = do
+    -- e.g. topDir == '/opt/imagetrove/incoming'
+    --      dir    == '/opt/imagetrove/incoming/uqchamal/experiment1'
+
+    liftIO $ do putStrLn $ "saveMove: topDir: "      ++ topDir
+                putStrLn $ "saveMove: dir: "         ++ dir
+                putStrLn $ "saveMove: destination: " ++ destination
+
+    let part = joinPath $ drop (length $ splitPath topDir) (splitPath dir) -- e.g. 'uqchamal/experiment1'
+        result0 = destination </> part
+
+    liftIO $ putStrLn $ "Attempting to move " ++ dir ++ " to " ++ result0
+
+    -- topDir must be a prefix of dir.
+    let result1 = if topDir `isPrefixOf` dir
+                        then Right result0
+                        else Left $ topDir ++ " is not prefix of " ++ dir
+    print result1
+
+    -- dir must be stable
+    s <- isStable dir
+    let result2 = case s of Right True  -> result1
+                            Right False -> Left $ "Error: source directory " ++ dir ++ " is not stable."
+                            Left  err   -> Left err
+    print result2
+
+    -- destination </> part must not exist
+    let fullDestination = destination </> part
+        g = \r d b -> if not b then r else Left $ "Error: destination " ++ d ++ " exists."
+    result3 <- (g result2 fullDestination) <$> fileExist fullDestination
+    print ("fullDestination", fullDestination)
+    print ("result3", result3)
+
+    target <- catch (createDirectoryIfMissing True fullDestination >> return (Right ()))
+                    (\e -> return $ Left $ show (e :: IOException))
+    print target
+
+    let cmd  = "rsync"
+        args = [ "-a"
+               , (dropTrailingPathSeparator dir)             ++ "/" -- trailing slash for rsync
+               , (dropTrailingPathSeparator fullDestination) ++ "/" -- trailing slash for rsync
+               ]
+
+    print (cmd, args)
+
+    x <- runShellCommand cmd args
+    print x
+
+    let result4 = case x of err@(Left _) -> err
+                            Right _      -> result3
+    print result4
+
+    finalResult <- case result4 of err@(Left _) -> return err
+                                   Right _      -> removeRecursively dir
+
+    return finalResult
 
 
 
+processBrukerExperiment' :: (FilePath, Maybe FilePath, FilePath, [String], String, String, String, String, String, String, FilePath) -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError [(FilePath, A.Result RestDatasetFile)])
+processBrukerExperiment' instrumentConfig dir = do
+    let (topLevelDirectory, subdirectory, processedDirectory, operators, institution, institutionalDepartmentName, institutionAddress, schemaExperiment, schemaDataset, schemaFile, tmp) = instrumentConfig
+
+    tarballTempDir <- liftIO $ createTempDirectory tmp "bruker_experiment"
+    mincTempDir    <- liftIO $ createTempDirectory tmp "bruker_to_minc"
+
+    projectID       <- stage1 dir
+    projectResult   <- traverse stage2 projectID
+
+    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
+
+    tarball         <- stage3  tarballTempDir schemaExperiment schemaDataset schemaFile dir
+    mincFiles       <- stage3a mincTempDir schemaExperiment schemaDataset schemaFile dir
+    thumbnails      <- joinEither <$> traverse stage3b mincFiles
+
+    ie              <- stage4 schemaExperiment institution institutionalDepartmentName institutionAddress operators dir
+    e               <- joinEither <$> traverse stage5 ie
+
+    ds              <- joinEither <$> traverse (stage6 schemaDataset) e
+
+    let (+++) a b c = a ++ b ++ c
+        files = (+++) <$> (pure <$> tarball) <*> mincFiles <*> thumbnails
+
+    -- If the tarball isn't there then we give up. Other files,
+    -- such as MINCs and thumbnails, are optional.
+
+    finalResult <- case (tarball, files) of
+        (Left terr, _           )   -> return $ Left terr
+        (Right   _, Right files')   -> joinEither <$> traverse (stage7 schemaFile files') ds
+
+    debug <- mytardisDebug <$> ask
+
+    when (not debug) $
+        forM_ [tarballTempDir, mincTempDir] $ \x -> liftIO $
+            do putStrLn $ "Removing temp directory: " ++ x
+               removeRecursiveSafely x
+
+    return finalResult
+
+{-
+processBrukerExperiment :: (FilePath, Maybe FilePath, [String], String, String, String, String, String, String, FilePath) -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError (RestExperiment, RestDataset, [(FilePath, A.Result RestDatasetFile)]))
+processBrukerExperiment instrumentConfig dir = do
+
+    let (topLevelDirectory, subdirectory, operators, institution, institutionalDepartmentName, institutionAddress, schemaExperiment, schemaDataset, schemaFile, tmp) = instrumentConfig
+
+    tarballTempDir <- liftIO $ createTempDirectory tmp "bruker_experiment"
+    mincTempDir    <- liftIO $ createTempDirectory tmp "bruker_to_minc"
+
+    projectID <- liftIO $ readProjectID dir
+
+    case projectID of
+       Left pidErr -> return $ Left $ BrukerNoProjectID pidErr
+       Right projectID' -> do projectResult <- getOrCreateGroup $ "Project " ++ projectID'
+                              case projectResult of A.Error   projErr        -> return $ Left $ BrukerCreateProjectGroupError projErr
+                                                    A.Success _ ->  do tarball <- liftIO $ tarBrukerDirectory tarballTempDir dir
+                                                                       mincDir <- liftIO $ brukerToMinc       mincTempDir    dir
+
+                                                                       schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
+
+                                                                       case tarball of
+                                                                           Left err        -> return $ Left $ BrukerTarballError err
+                                                                           Right tarball'  -> do mincFiles  <- liftIO $ mincFilesInDir mincDir
+                                                                                                 thumbnails <- liftIO $ forM mincFiles createMincThumbnail
+
+                                                                                                 forM_ (lefts thumbnails) $ \terr -> liftIO $ putStrLn $ "Error when creating thumbnail: " ++ terr
+
+                                                                                                 ie <- liftIO $ identifyBrukerExperiment schemaExperiment institution institutionalDepartmentName institutionAddress operators dir
+
+                                                                                                 case ie of
+                                                                                                   Left ieErr  -> return $ Left $ BrukerIdentifyError ieErr
+                                                                                                   Right ie'   -> do e <- createExperiment ie'
+
+                                                                                                                     case e of
+                                                                                                                       A.Error eerr -> return $ Left $ BrukerCreateExperimentError eerr
+                                                                                                                       A.Success e' -> do let ids = IdentifiedDataset
+                                                                                                                                                       "Bruker dataset"
+                                                                                                                                                       [eiResourceURI e']
+                                                                                                                                                       [(schemaDataset, Map.empty)]
+                                                                                                                                          ds <- createDataset ids
+
+                                                                                                                                          case ds of
+                                                                                                                                               A.Error derr  -> return $ Left $ BrukerCreateDatasetError derr
+                                                                                                                                               A.Success ds' -> do fileResults <- pushFiles schemaFile identifyDatasetFile ds' ([tarball'] ++ mincFiles ++ rights thumbnails)
+                                                                                                                                                                   case fileResults of
+                                                                                                                                                                       Right fileResults' -> return $ Right $ (e', ds', fileResults')
+                                                                                                                                                                       Left  fileErrors   -> return $ Left  $ BrukerCreateFilesError fileErrors
+
+-}
+
+imageTroveMain :: IO ()
+imageTroveMain = do
+    opts' <- execParser opts
+
+    let host     = fromMaybe "http://localhost:8000" $ optHost opts'
+        config   = optConfigFile opts'
+        debug    = optDebug opts'
+
+    mytardisOpts <- getConfig host config Nothing debug
+
+    case mytardisOpts of
+        (Just mytardisOpts') -> runReaderT (dostuff config) mytardisOpts'
+        _                    -> error $ "Could not read config file: " ++ config
+
+  where
+    opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-bruker-uploader - upload Bruker data to a MyTARDIS server" )
 
 
+getTopLevelDirectory  (topLevelDirectory, _,            _,                  _, _, _, _, _, _, _, _) = topLevelDirectory
+getSubdirectory       (_,                 subdirectory, _,                  _, _, _, _, _, _, _, _) = subdirectory
+getProcessedDirectory (_,                 _,            processedDirectory, _, _, _, _, _, _, _, _)    = processedDirectory
 
+doInstrument iconfig = do
 
+    let topDir          = getTopLevelDirectory  iconfig
+        subDir          = getSubdirectory       iconfig
+        processedDir    = getProcessedDirectory iconfig
 
+    liftIO $ putStrLn $ "doInstrument: topDir: "       ++ topDir
+    liftIO $ putStrLn $ "doInstrument: subDir: "       ++ show subDir
+    liftIO $ putStrLn $ "doInstrument: processedDir: " ++ processedDir
 
+    -- topDir like: /data/home/uqchamal/mounts/bio94t/opt/imagetrove/archive_PV5.1
 
+    -- Each user has a directory under the top directory.
+    userDirs <- liftIO $ getDirs topDir -- ["uqchamal", "uqytesir", ...]
+
+    possibleExperimentDirs <- liftIO $ case (userDirs, subDir) of
+        (Right userDirs', Just subDir')     -> forM [topDir </> ud </> subDir' | ud <- userDirs'] getDirs >>= (return . concat . rights)
+        (Right userDirs', Nothing)          -> forM [topDir </> ud             | ud <- userDirs'] getDirs >>= (return . concat . rights)
+        _                                   -> return []
+
+    let foo (Right True) = True
+        foo _            = False
+
+    stable <- liftIO $ filterM ((fmap foo) . isStable) possibleExperimentDirs
+
+    liftIO $ putStrLn $ "doInstrument: stable: " ++ show stable
+
+    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir processedDir
+
+doExperiment iconfig dir topDir subDir processedDir = do
+    liftIO $ putStrLn $ "Processing: " ++ dir
+    x <- processBrukerExperiment' iconfig dir
+    case x of
+      Left (BrukerTarballError             s)            -> liftIO $ putStrLn $ "Error creating tarball: " ++ s
+      Left (BrukerIdentifyError            s)            -> liftIO $ putStrLn $ "Error identifying experiment: " ++ s
+      Left (BrukerCreateExperimentError    s)            -> liftIO $ putStrLn $ "Error creating experiment: " ++ s
+      Left (BrukerCreateDatasetError       s)            -> liftIO $ putStrLn $ "Error creating dataset: " ++ s
+      Left (BrukerCreateFilesError         fileErrors)   -> liftIO $ putStrLn $ "Error creating file(s): " ++ show fileErrors
+      Left (BrukerCreateProjectGroupError  s)            -> liftIO $ putStrLn $ "Error creating project group: " ++ s
+      Left (BrukerNoProjectID s)                         -> liftIO $ putStrLn $ "Error: could not find project ID in subject file: " ++ s
+      Right _ -> liftIO $ do putStrLn $ "Processed: " ++ dir
+                             putStrLn $ "Now attempting safe copy to move to processed directory."
+                             y <- safeMove topDir dir processedDir
+                             case y of Right _      -> putStrLn $ "Successfully moved experiment to " ++ processedDir
+                                       err@(Left _) -> putStrLn $ "Error while moving experiment to processed directory: " ++ show err
+
+dostuff configFile = do
+    instrumentConfigs <- liftIO $ readInstrumentConfigs configFile
+    forM_ instrumentConfigs doInstrument

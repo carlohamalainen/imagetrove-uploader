@@ -850,9 +850,9 @@ createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile) = do
 
     case schemas of
         Error e -> return $ Error e
-        Success schemas' -> do experimentSchema <- createIfMissing "DICOM Metadata Experiment" schemaExperiment SchemaExperiment  schemas'
-                               datasetSchema    <- createIfMissing "DICOM Metadata Dataset"    schemaDataset    SchemaDataset     schemas'
-                               fileSchema       <- createIfMissing "DICOM Metadata File"       schemaFile       SchemaDatasetFile schemas'
+        Success schemas' -> do experimentSchema <- createIfMissing "Experiment Metadata" schemaExperiment SchemaExperiment  schemas'
+                               datasetSchema    <- createIfMissing "Dataset Metadata"    schemaDataset    SchemaDataset     schemas'
+                               fileSchema       <- createIfMissing "File Metadata"       schemaFile       SchemaDatasetFile schemas'
 
                                case (experimentSchema, datasetSchema, fileSchema) of
                                          (Success experimentSchema', Success datasetSchema', Success fileSchema') -> return $ Success (experimentSchema', datasetSchema', fileSchema')

@@ -343,7 +343,7 @@ imageTroveMain = do
 
   where
 
-    opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-uploader - upload DICOM files to a MyTARDIS server" )
+    opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-dicom-uploader - upload DICOM files to a MyTARDIS server" )
 
 caiProjectID :: [DicomFile] -> A.Result String
 caiProjectID files = let oneFile = headMay files in
