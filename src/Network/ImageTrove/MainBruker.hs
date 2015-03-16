@@ -621,5 +621,14 @@ doExperiment iconfig dir topDir subDir processedDir = do
                                        err@(Left _) -> putStrLn $ "Error while moving experiment to processed directory: " ++ show err
 
 dostuff configFile = do
-    instrumentConfigs <- liftIO $ readInstrumentConfigs configFile
-    forM_ instrumentConfigs doInstrument
+    origDir <- liftIO getCurrentDirectory
+    forever $ do liftIO $ setCurrentDirectory origDir
+
+                 -- Main work:
+                 instrumentConfigs <- liftIO $ readInstrumentConfigs configFile
+                 forM_ instrumentConfigs doInstrument
+
+                 -- Snooze:
+                 let sleepMinutes = 1
+                 liftIO $ printf "Sleeping for %d minutes...\n" sleepMinutes
+                 liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
