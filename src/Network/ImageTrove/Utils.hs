@@ -26,6 +26,14 @@ runShellCommand cmd args = do
     return $ case x of Left e            -> Left e
                        Right (stdOut, _) -> Right $ map w2c $ BS.unpack $ BSL.toStrict stdOut
 
+-- | Run the shell command and return some output, ignoring the
+-- return code. This is useful for badly behaved utilities.
+runShellCommand' :: FilePath -> [String] -> IO String
+runShellCommand' cmd args = do
+    x <- simpleSafeExecute (pipeoe $ separated (surely B.toLazyM) (surely B.toLazyM)) (proc cmd args)
+    return $ case x of Left e            -> e
+                       Right (stdOut, _) -> map w2c $ BS.unpack $ BSL.toStrict stdOut
+
 computeChecksum :: FilePath -> IO (Either String String)
 computeChecksum fileName = liftM (head . words) <$> runShellCommand "md5sum" [fileName]
 
