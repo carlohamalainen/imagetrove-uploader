@@ -298,6 +298,7 @@ majorOrthancGroups = do
 extendWithSeries (Success patient, Success study) = do
     series <- mapM getSeries (ostudySeries study)
     return [(patient, study, s) | s <- catResults series]
+extendWithSeries _ = return []
 
 extendWithOneInstance (patient, study, series) = do
     oneInstance <- traverse getInstance (headMay $ oseriesInstances series)
