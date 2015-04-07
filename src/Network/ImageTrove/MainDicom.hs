@@ -125,9 +125,12 @@ uploadAllAction opts = do
 getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
 getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
 
-patientsToProcess :: FilePath 
+getHashes :: (OrthancPatient, OrthancStudy, OrthancSeries) -> PatientStudySeries
+getHashes (patient, study, series) = (opID patient, ostudyID study, oseriesID series)
+
+patientsToProcess :: FilePath
                   -> [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-                  -> [(String, Maybe ZonedTime)]
+                  -> [(PatientStudySeries, Maybe ZonedTime)]
                   -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
 patientsToProcess fp ogroups hashAndLastUpdated = do
     m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
@@ -173,31 +176,40 @@ uploadDicomAction opts origDir = do
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             case _ogroups of Left err -> undefined
-                             Right ogroups -> do 
+                             Right ogroups -> do
                                                  let -- Times that available patients have been updated:
                                                      updatedTimes = map (\(p, _, _, _, _) -> (getPatientLastUpdate tz p)) ogroups :: [Maybe ZonedTime]
 
                                                      -- Hash of each:
-                                                     hashes = map (\(p, _, _, _, _) -> opID p) ogroups
+                                                     hashes = map (\(patient, study, series, _, _) -> getHashes (patient, study, series)) ogroups
 
                                                      -- Together:
                                                      hashAndLastUpdated = zip hashes updatedTimes
 
                                                  recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
+ 
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
+                                                 liftIO $ getZonedTime >>= print
 
                                                  forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "getting series archive...."
                                                      Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "got series archive."
 
                                                      liftIO $ print (tempDir, zipfile)
 
                                                      Right linksDir <- liftIO $ unpackArchive tempDir zipfile
+                                                     liftIO $ getZonedTime >>= print
                                                      liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
                                                      createProjectGroup linksDir
 
                                                      files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
                                                      oneGroupResult <- uploadDicomAsMincOneGroup
                                                          files
                                                          instrumentFilters
@@ -228,7 +240,8 @@ uploadDicomAction opts origDir = do
                                                                                                           removeRecursiveSafely tempDir
                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
                                                                                                           removeRecursiveSafely linksDir
-                                                                                                          updateLastUpdate fp (opID patient) (getPatientLastUpdate tz patient)
+                                                                                                          putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getPatientLastUpdate tz patient)
+                                                                                                          updateLastUpdate fp (getHashes (patient, study, series)) (getPatientLastUpdate tz patient)
                                                                      A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
                                                                                                           if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
                                                                                                                            putStrLn $ "Not deleting links directory: " ++ linksDir

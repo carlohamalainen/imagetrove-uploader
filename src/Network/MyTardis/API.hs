@@ -48,10 +48,13 @@ import System.IO
 
 import System.Unix.Directory (removeRecursiveSafely)
 
+import Data.Time.LocalTime (getZonedTime)
+
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
+    now <- liftIO $ show <$> getZonedTime
     MyTardisConfig _ _ _ _ _ logfile _ _ _ <- ask
-    liftIO $ traverse (`hPutStrLn` msg) logfile
+    liftIO $ traverse (`hPutStrLn` (now ++ " :: " ++ msg)) logfile
     return ()
 
 data MyTardisConfig = MyTardisConfig
@@ -346,13 +349,15 @@ calcFileMetadata _filepath = do
         Right md5sum' -> Just (filepath, md5sum', size)
         Left _        -> Nothing
 
+data FoundDatasetFile = ExistingFile RestDatasetFile | NewFile RestDatasetFile deriving (Eq, Show)
+
 -- | Create a location for a dataset file in MyTARDIS. Fails if a matching file exists in this dataset.
 -- It is our responsibility to copy the supplied location. See "copyFileToStore". Until we do so (and the checksums match)
 -- the related "RestReplica" will have @replicaVerified == False@.
 createFileLocation
     :: Integer                                            -- ^ ID of parent dataset.
     -> IdentifiedFile                                     -- ^ Identified file.
-    -> ReaderT MyTardisConfig IO (Result RestDatasetFile) -- New dataset file resource.
+    -> ReaderT MyTardisConfig IO (Result FoundDatasetFile) -- New dataset file resource.
 createFileLocation datasetID idf@(IdentifiedFile datasetURL filepath md5sum size metadata) = do
 
     -- Match on just the base bit of the file, not the whole path.
@@ -365,7 +370,7 @@ createFileLocation datasetID idf@(IdentifiedFile datasetURL filepath md5sum size
 
     case x of
         Right dsf -> do writeLog $ "createFileLocation: location already exists, not creating another: " ++ show dsf
-                        return $ Error "Matching file exists. We will not create another."
+                        return $ Success $ ExistingFile dsf -- Error "Matching file exists. We will not create another."
         Left NoMatches        -> let m = object
                                         [ ("dataset",           String $ T.pack datasetURL)
                                         , ("filename",          String $ T.pack $ takeFileName filepath)
@@ -374,7 +379,10 @@ createFileLocation datasetID idf@(IdentifiedFile datasetURL filepath md5sum size
                                         , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
                                         , ("replicas",          toJSON $ mkSharedLocation (show datasetID) [(takeFileName filepath, "imagetrove")]) -- FIXME hardcoded Location name
                                         ] in do writeLog "No matches, creating resource."
-                                                createResource "/dataset_file/" getDatasetFile m
+                                                dsfNew <- createResource "/dataset_file/" getDatasetFile m
+                                                case dsfNew of
+                                                    Success dsfNew' -> return $ Success $ NewFile dsfNew'
+                                                    Error    e      -> return $ Error e
 
         Left TwoOrMoreMatches -> do writeLog $ "createFileLocation: Found two or more matches for this file, will not create another: " ++ filepath
                                     return $ Error $ "Found two or more matches for this file, will not create another: " ++ filepath
@@ -397,8 +405,8 @@ getResource uri = do
         Nothing     -> do writeLog "getResource: could not decode resource."
                           return $ Error "Could not decode resource."
 
-getParameterName :: URI -> ReaderT MyTardisConfig IO (Result RestParameterName)
-getParameterName = getResource
+-- getParameterName :: URI -> ReaderT MyTardisConfig IO (Result RestParameterName)
+-- getParameterName = getResource
 
 getExperimentParameterSet :: URI -> ReaderT MyTardisConfig IO (Result RestExperimentParameterSet)
 getExperimentParameterSet = getResource
@@ -538,8 +546,8 @@ getPermissions :: ReaderT MyTardisConfig IO (Result [RestPermission])
 getPermissions = getList "/permission"
 
 -- | Retrieve all parameter names.
-getParameterNames :: ReaderT MyTardisConfig IO (Result [RestParameterName])
-getParameterNames = getList "/parametername"
+-- getParameterNames :: ReaderT MyTardisConfig IO (Result [RestParameterName])
+-- getParameterNames = getList "/parametername"
 
 -- | Retrieve all groups.
 getGroups :: ReaderT MyTardisConfig IO (Result [RestGroup])
@@ -689,8 +697,10 @@ getBoth eparam = do
                           _                            -> return Nothing
 
 getParName :: RestParameter -> ReaderT MyTardisConfig IO (Result String)
-getParName eparam = fmap pnName <$> getParameterName (epName eparam)
-
+-- getParName eparam = fmap pnName <$> getParameterName (epName eparam)
+getParName eparam = return $ case epNameCache eparam of
+                               ""  -> Error "No name_cache value found"
+                               n   -> Success n
 
 -- Get a user if they already exist (matching on the @username@) otherwise create the user.
 -- If a user already exists and they have @isSuperuser == False@ and we call this function
@@ -817,12 +827,14 @@ uploadFileBasic schemaFile identifyDatasetFile d f m = do
         Just  (filepath, md5sum, size) -> do let idf = identifyDatasetFile d filepath md5sum size m
                                              dsf <- createFileLocation (dsiID d) idf
 
-                                             case dsf of Success dsf' -> do results <- copyFileToStore f dsf'
-                                                                            case allSuccesses results of
-                                                                                Success _ -> do writeLog $ "uploadFileBasic: created file location: " ++ show dsf'
-                                                                                                return $ Success dsf'
-                                                                                Error e   -> do writeLog $ "uploadFileBasic: error while copying file: " ++ e
-                                                                                                return $ Error e
+                                             case dsf of (Success (NewFile dsf')) -> do results <- copyFileToStore f dsf'
+                                                                                        case allSuccesses results of
+                                                                                            Success _ -> do writeLog $ "uploadFileBasic: created file location: " ++ show dsf'
+                                                                                                            return $ Success dsf'
+                                                                                            Error e   -> do writeLog $ "uploadFileBasic: error while copying file: " ++ e
+                                                                                                            return $ Error e
+                                                         (Success (ExistingFile dsf')) -> do writeLog $ "uploadFileBasic: warning, ignoring existing dataset file: " ++ show dsf'
+                                                                                             return $ Success dsf' -- FIXME log a message here
                                                          Error e      -> do writeLog $ "uploadFileBasic: error creating file location resource: " ++ e
                                                                             return $ Error e
         Nothing                        -> do writeLog $ "uploadFileBasic: Failed to calculate checksum for " ++ f
@@ -918,8 +930,10 @@ uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields da
 uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
     writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators))
 
+    writeLog $ "Getting schemas."
     schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
  
+    writeLog $ "Identifying experiment."
     let ie = identifyExperiment
                 schemaExperiment
                 defaultInstitutionName
@@ -930,10 +944,13 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
                 instrumentMetadataFields
                 files
 
+    writeLog $ "Creating experiment."
     e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
 
+    writeLog $ "Identifying dataset."
     let ids = resultMaybeToResult ((\e -> identifyDataset schemaDataset datasetFields e files) <$> e) :: Result IdentifiedDataset
 
+    writeLog $ "Creating dataset."
     d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
 
     let oneFile = headMay files
@@ -947,6 +964,7 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
                               ]) <$> oneFile
  
     -- Pack the dicom files as Minc
+    writeLog $ "Converting DICOM to Minc."
     dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
 
     case (e, d, filemetadata) of
@@ -977,33 +995,33 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFi
     toMinc2Results <- liftIO $ forM mincFiles mncToMnc2 -- FIXME check results
 
     stuff <- forM mincFiles $ \f -> do
-        liftIO $ putStrLn $ "uploadDicomAsMinc: minc file f: " ++ show f
+        writeLog $ "uploadDicomAsMinc: minc file f: " ++ show f
         dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
-        liftIO $ putStrLn $ "uploadDicomAsMinc: dsf: " ++ show dsf
+        writeLog $ "uploadDicomAsMinc: dsf: " ++ show dsf
 
         thumbnail <- liftIO $ createMincThumbnail f
-        liftIO $ putStrLn $ "uploadDicomAsMinc: thumbnail: " ++ show thumbnail
+        writeLog $ "uploadDicomAsMinc: thumbnail: " ++ show thumbnail
 
         dsft <- traverse (\thm -> uploadFileBasic schemaFile identifyDatasetFile d thm filemetadata) thumbnail
 
         case (dsf, dsft) of
-            (Error e, _)                          -> do liftIO $ putStrLn $ "Error while uploading file: " ++ e
-                                                        liftIO $ putStrLn $ "See also the directory: " ++ tempDir
+            (Error e, _)                          -> do writeLog $ "Error while uploading file: " ++ e
+                                                        writeLog $ "See also the directory: " ++ tempDir
                                                         return (MincFileError e, dsf, dsft)
-            (Success dsf', Right (Success dsft')) -> do liftIO $ putStrLn $ "Successfully uploaded file: " ++ f
-                                                        liftIO $ putStrLn $ "Successfully uploaded thumbnail: " ++ show thumbnail
+            (Success dsf', Right (Success dsft')) -> do writeLog $ "Successfully uploaded file: " ++ f
+                                                        writeLog $ "Successfully uploaded thumbnail: " ++ show thumbnail
                                                         return (BothOK, dsf, dsft)
-            (Success dsf', Right (Error e))       -> do liftIO $ putStrLn $ "Error when creating thumbnail dataset file: " ++ e
+            (Success dsf', Right (Error e))       -> do writeLog $ "Error when creating thumbnail dataset file: " ++ e
                                                         return (ThumbnailError e, dsf, dsft)
-            (Success dsf', Left e)                -> do liftIO $ putStrLn $ "Error (http?) when creating thumbnail dataset file: " ++ e
+            (Success dsf', Left e)                -> do writeLog $ "Error (http?) when creating thumbnail dataset file: " ++ e
                                                         return (ThumbnailError e, dsf, dsft)
 
     debug <- mytardisDebug <$> ask
 
     if debug
-        then liftIO $ putStrLn $ "Not removing temporary directory: " ++ tempDir
-        else liftIO $ do putStrLn $ "Removing temporary directory: " ++ tempDir
-                         removeRecursiveSafely tempDir
+        then writeLog $ "Not removing temporary directory: " ++ tempDir
+        else do writeLog $ "Removing temporary directory: " ++ tempDir
+                liftIO $ removeRecursiveSafely tempDir
 
     return stuff
 
