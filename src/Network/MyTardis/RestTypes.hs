@@ -98,6 +98,7 @@ data RestParameter = RestParameter
     { epDatetimeValue   :: Maybe String
     , epID              :: Integer
     , epName            :: String       -- ^ URI to parametername, e.g. \"\/api\/v1\/parametername\/63\/\"
+    , epNameCache       :: String       -- ^ Actual name, as if we had looked up the parametername URI.
     , epNumericalValue  :: Maybe Float  -- ^ Numerical value.
     , epParametersetURL :: String       -- ^ URI to parameterset, e.g. \"\/api\/v1\/experimentparameterset\/13\/\"
     , epResourceURI     :: String       -- ^ URI for this parameter, e.g. \"\/api\/v1\/experimentparameter\/33\/\"
@@ -110,6 +111,7 @@ instance FromJSON RestParameter where
         v .: "datetime_value"   <*>
         v .: "id"               <*>
         v .: "name"             <*>
+        v .: "name_cache"       <*>
         v .: "numerical_value"  <*>
         v .: "parameterset"     <*>
         v .: "resource_uri"     <*>
@@ -118,7 +120,7 @@ instance FromJSON RestParameter where
     parseJSON _          = mzero
 
 instance ToJSON RestParameter where
-    toJSON (RestParameter datetime id name numval pset uri sval _) = object
+    toJSON (RestParameter datetime id name namecache numval pset uri sval _) = object
                                                                             [ ("datetime_value",    toJSON datetime)
                                                                             , ("id",                toJSON id)
                                                                             , ("name",              toJSON name)

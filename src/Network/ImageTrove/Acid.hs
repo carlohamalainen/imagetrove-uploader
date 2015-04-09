@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
-module Network.ImageTrove.Acid (loadMap, updateLastUpdate) where
+module Network.ImageTrove.Acid (loadMap, updateLastUpdate, PatientStudySeries(..)) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -16,7 +16,9 @@ import qualified Data.Map as Map
 
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
-type Key   = String
+type PatientStudySeries = (String, String, String)
+
+type Key   = PatientStudySeries
 type Value = Maybe ZonedTime
 
 data KeyValue = KeyValue !(Map.Map Key Value) deriving (Typeable)
@@ -28,6 +30,11 @@ insertKey key value = do
     KeyValue m <- get
     put (KeyValue (Map.insert key value m))
 
+deleteKey :: Key -> Update KeyValue ()
+deleteKey key = do
+    KeyValue m <- get
+    put (KeyValue (Map.delete key m))
+
 lookupKey :: Key -> Query KeyValue (Maybe Value)
 lookupKey key = do
     KeyValue m <- ask
@@ -38,7 +45,7 @@ getMapInternal = do
     KeyValue m <- ask
     return m
 
-$(makeAcidic ''KeyValue ['insertKey, 'lookupKey, 'getMapInternal])
+$(makeAcidic ''KeyValue ['insertKey, 'deleteKey, 'lookupKey, 'getMapInternal])
 
 loadMap :: FilePath -> IO (Map.Map Key Value)
 loadMap fp = do
@@ -47,8 +54,14 @@ loadMap fp = do
     closeAcidState acid
     return m
 
-updateLastUpdate :: FilePath -> String -> Maybe ZonedTime -> IO ()
-updateLastUpdate fp hash lastUpdate = do
+updateLastUpdate :: FilePath -> PatientStudySeries -> Maybe ZonedTime -> IO ()
+updateLastUpdate fp hashes lastUpdate = do
     acid <- openLocalStateFrom fp (KeyValue Map.empty)
-    _ <- update acid (InsertKey hash lastUpdate)
+    _ <- update acid (InsertKey hashes lastUpdate)
+    closeAcidState acid
+
+deleteLastUpdate :: FilePath -> PatientStudySeries -> IO ()
+deleteLastUpdate fp hashes = do
+    acid <- openLocalStateFrom fp (KeyValue Map.empty)
+    _ <- update acid (DeleteKey hashes)
     closeAcidState acid
