@@ -13,3 +13,4 @@ ghcid/*
 *.log
 state/*
 state_*conf/*
+.nfs*
