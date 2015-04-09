@@ -50,6 +50,7 @@ data OrthancPatient = OrthancPatient
     , opMainDicomTags :: M.Map String String
     , opStudies :: [String]
     , opType :: String
+    , opAnonymizedFrom :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -60,7 +61,8 @@ instance FromJSON OrthancPatient where
         v .: "LastUpdate"       <*>
         v .: "MainDicomTags"    <*>
         v .: "Studies"          <*>
-        v .: "Type"
+        v .: "Type"             <*>
+        v .: "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancStudy = OrthancStudy
@@ -71,6 +73,7 @@ data OrthancStudy = OrthancStudy
     , ostudyParentPatient :: String
     , ostudySeries :: [String]
     , ostudyType :: String
+    , ostudyAnonymizedFrom :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -82,7 +85,8 @@ instance FromJSON OrthancStudy where
         v .: "MainDicomTags"    <*>
         v .: "ParentPatient"    <*>
         v .: "Series"           <*>
-        v .: "Type"
+        v .: "Type"             <*>
+        v .: "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancSeries = OrthancSeries
@@ -95,6 +99,7 @@ data OrthancSeries = OrthancSeries
     , oseriesParentStudy :: String
     , oseriesStatus :: String
     , oseriesType :: String
+    , oseriesAnonymizedFrom :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -108,7 +113,8 @@ instance FromJSON OrthancSeries where
         v .: "MainDicomTags"             <*>
         v .: "ParentStudy"               <*>
         v .: "Status"                    <*>
-        v .: "Type"
+        v .: "Type"                      <*>
+        v .: "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancInstance = OrthancInstance
@@ -119,18 +125,20 @@ data OrthancInstance = OrthancInstance
     , oinstMainDicomTags :: M.Map String String
     , oinstParentSeries :: String
     , oinstType :: String
+    , oinstAnonymizedFrom :: Maybe String
     }
     deriving (Eq, Show)
 
 instance FromJSON OrthancInstance where
     parseJSON (Object v) = OrthancInstance <$>
-        v .: "FileSize" <*>
-        v .: "FileUuid" <*>
-        v .: "ID" <*>
-        v .: "IndexInSeries" <*>
-        v .: "MainDicomTags" <*>
-        v .: "ParentSeries" <*>
-        v .: "Type"
+        v .: "FileSize"                    <*>
+        v .: "FileUuid"                    <*>
+        v .: "ID"                          <*>
+        v .: "IndexInSeries"               <*>
+        v .: "MainDicomTags"               <*>
+        v .: "ParentSeries"                <*>
+        v .: "Type"                        <*>
+        v .: "AnonymizedFrom"
     parseJSON _          = mzero
 
 data Tag = Tag
@@ -194,7 +202,6 @@ getPatients = do
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
         Nothing     -> Error "Could not decode resource."
-
 
 getPatient :: String -> ReaderT MyTardisConfig IO (Result OrthancPatient)
 getPatient oid = do
@@ -316,9 +323,14 @@ extendWithTags (patient, study, series, oneInstance) = do
                  Error e       -> do writeLog $ "Warning: could not retrieve tags for instance: " ++ e
                                      return []
 
+-- FIXME This is silly - throwing away possible errors. Also the
+-- type of extendWithSeries should be different.
 catResults [] = []
 catResults (Success x:xs) = x : catResults xs
 catResults (Error _:xs) = catResults xs
+
+anonymizeSeries :: String -> ReaderT MyTardisConfig IO (Either String String)
+anonymizeSeries = undefined
 
 getSeriesArchive :: String -> ReaderT MyTardisConfig IO (Either String (FilePath, FilePath))
 getSeriesArchive sid = do
