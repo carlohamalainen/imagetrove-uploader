@@ -186,6 +186,8 @@ uploadDicomAction opts origDir = do
                                                      -- Together:
                                                      hashAndLastUpdated = zip hashes updatedTimes
 
+                                                 liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
+
                                                  recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
  
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups

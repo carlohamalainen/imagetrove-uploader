@@ -62,7 +62,7 @@ instance FromJSON OrthancPatient where
         v .: "MainDicomTags"    <*>
         v .: "Studies"          <*>
         v .: "Type"             <*>
-        v .: "AnonymizedFrom"
+        v .:? "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancStudy = OrthancStudy
@@ -86,7 +86,7 @@ instance FromJSON OrthancStudy where
         v .: "ParentPatient"    <*>
         v .: "Series"           <*>
         v .: "Type"             <*>
-        v .: "AnonymizedFrom"
+        v .:? "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancSeries = OrthancSeries
@@ -114,7 +114,7 @@ instance FromJSON OrthancSeries where
         v .: "ParentStudy"               <*>
         v .: "Status"                    <*>
         v .: "Type"                      <*>
-        v .: "AnonymizedFrom"
+        v .:? "AnonymizedFrom"
     parseJSON _          = mzero
 
 data OrthancInstance = OrthancInstance
@@ -138,7 +138,7 @@ instance FromJSON OrthancInstance where
         v .: "MainDicomTags"               <*>
         v .: "ParentSeries"                <*>
         v .: "Type"                        <*>
-        v .: "AnonymizedFrom"
+        v .:? "AnonymizedFrom"
     parseJSON _          = mzero
 
 data Tag = Tag
