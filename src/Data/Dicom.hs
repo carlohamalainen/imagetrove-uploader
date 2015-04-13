@@ -166,6 +166,8 @@ pManufacturer                = parseField "(0008,0070) LO"
 
 pSequenceName                = parseField "(0018,0024) SH"
 
+pStationName                 = parseField "(0008,1010) SH"
+
 parseSingleMatch :: ParsecT String () Identity String -> String -> Maybe String
 parseSingleMatch p s = case parses of
                             ["(no value available)"] -> Nothing
@@ -216,6 +218,8 @@ fieldToFn "ManufacturerModelName"   = dicomManufacturerModelName
 fieldToFn "Manufacturer"            = dicomManufacturer
 
 fieldToFn "SequenceName"            = dicomSequenceName
+
+fieldToFn "StationName"             = dicomStationName
 
 fieldToFn f = error $ "Unknown DICOM field name [" ++ f ++ "]. Please report this."
 
@@ -268,6 +272,8 @@ data DicomFile = DicomFile
     , dicomManufacturer                 :: Maybe String
 
     , dicomSequenceName                 :: Maybe String
+
+    , dicomStationName                  :: Maybe String
     }
     deriving (Eq, Show)
 
@@ -321,6 +327,8 @@ readDicomMetadata fileName = do
                                     (parseHere pManufacturer)
 
                                     (parseHere pSequenceName)
+
+                                    (parseHere pStationName)
 
 getDicomFilesInDirectory :: String -> FilePath -> IO [FilePath]
 getDicomFilesInDirectory suffix dir = filter (isLowerSuffix suffix) <$> getFilesInDirectory dir

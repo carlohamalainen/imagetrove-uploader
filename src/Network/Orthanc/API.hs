@@ -164,6 +164,7 @@ data OrthancTags = OrthancTags
     , otagPatientName               :: Maybe Tag
     , otagInstitutionName           :: Maybe Tag
     , otagSequenceName              :: Maybe Tag
+    , otagStationName               :: Maybe Tag
     }
     deriving (Eq, Show)
 
@@ -176,6 +177,7 @@ tagSelector "SeriesDescription"         = Right $ \x -> join $ tagValue <$> otag
 tagSelector "PatientName"               = Right $ \x -> join $ tagValue <$> otagPatientName            x
 tagSelector "InstitutionName"           = Right $ \x -> join $ tagValue <$> otagInstitutionName        x
 tagSelector "SequenceName"              = Right $ \x -> join $ tagValue <$> otagSequenceName           x
+tagSelector "StationName"               = Right $ \x -> join $ tagValue <$> otagStationName            x
 tagSelector x = Left $ "Unknown DICOM field: " ++ show x
 
 instance FromJSON OrthancTags where
@@ -187,7 +189,8 @@ instance FromJSON OrthancTags where
         v .:? "0008,103e" <*>
         v .:? "0010,0010" <*>
         v .:? "0008,0080" <*>
-        v .:? "0018,0024"
+        v .:? "0018,0024" <*>
+        v .:? "0008,1010"
     parseJSON _          = mzero
 
 askHost :: ReaderT MyTardisConfig IO String
