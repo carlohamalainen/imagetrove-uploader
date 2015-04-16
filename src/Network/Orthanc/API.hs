@@ -280,15 +280,11 @@ getTags iid = do
         Nothing     -> Error "Could not decode resource."
 
 getPatientsStudies :: OrthancPatient -> ReaderT MyTardisConfig IO [Result OrthancStudy]
-getPatientsStudies patient = do
-    studies <- mapM getStudy $ opStudies patient
-    return $ filter (\s -> isSuccessTrue $ fmap (isNothing . ostudyAnonymizedFrom) s) studies
+getPatientsStudies patient = mapM getStudy $ opStudies patient
 
 {-
 getStudysSeries :: OrthancStudy -> ReaderT MyTardisConfig IO [Result OrthancSeries]
-getStudysSeries study = do
-    series <- mapM getSeries $ ostudySeries study
-    return $ filter (\s -> isSuccessTrue $ fmap (isNothing . oseriesAnonymizedFrom) s) series
+getStudysSeries study = mapM getSeries $ ostudySeries study
 -}
 
 -- Gets all real (not anonymized) patients.
@@ -322,6 +318,9 @@ majorOrthancGroups = do
                                   concat <$> mapM extendWithTags patientStudySeriesInstance
 
     return $ concat x
+
+isSuccessTrue (Success True) = True
+isSuccessTrue _              = False
 
 extendWithSeries (Success patient, Success study) = do
     _series <- mapM getSeries (ostudySeries study)
@@ -407,147 +406,3 @@ getOrthancInstrumentGroups instrumentIdentifiers orthancData =
     getRights []           = []
     getRights (Right r:rs) = r : getRights rs
     getRights (Left _:rs)  = getRights rs
-
-deleteAnonymizedPatient :: String -> ReaderT MyTardisConfig IO (Result ())
-deleteAnonymizedPatient oid = do
-    p <- getPatient' oid
-
-    liftIO $ print "deleteAnonymizedPatient"
-
-    case p of
-        Error e    -> return $ Error e
-        Success p' -> do studies <- mapM getStudy (opStudies p')
-                         liftIO $ print $ length studies
-                         mapM (traverse deleteStudyIfAnonymized) studies
-                         return $ Success () -- FIXME How do we tell if a delete failed?
-
-deleteStudyIfAnonymized :: OrthancStudy -> ReaderT MyTardisConfig IO (Result ())
-deleteStudyIfAnonymized study = case ostudyAnonymizedFrom study of
-                                  Nothing -> return $ Success ()
-                                  Just _  -> do host <- askHost
-                                                liftIO $ print $ "deleting: " ++ (ostudyID study)
-                                                liftIO $ deleteWith opts (host </> "studies" </> (ostudyID study))
-                                                return $ Success ()
-
-reAnonymizePatient :: String -> ReaderT MyTardisConfig IO (Result String)
-reAnonymizePatient oid = do
-    deleteAnonymizedPatient oid
-    anonymizePatient oid
-
-anonymizePatient :: String -> ReaderT MyTardisConfig IO (Result String)
-anonymizePatient oid = do
-    host <- askHost
-
-    p <- getPatient' oid
-
-    liftIO $ print p
-
-    let tags = opMainDicomTags <$> p
-        tagPatientID = M.lookup "PatientID" <$> tags
-
-    case tagPatientID of
-        Error e                      -> return $ Error $ "Could not get patient tags: " ++ e
-        Success Nothing              -> return $ Error $ "PatientID tag is missing for patient: " ++ show p
-        Success (Just tagPatientID') -> do let replace = toJSON $ ((M.fromList [ ("PatientName", tagPatientID')
-                                                                               , ("0010-0020", tagPatientID')
-                                                                               ] :: M.Map String String))
-                                               keep    = toJSON $ ((["StudyDescription", "SeriesDescription"] :: [String]))
- 
-                                               m = object [ "Replace" .= replace
-                                                          , "Keep"    .= keep
-                                                          ]
-
-                                           r <- liftIO $ postWith opts (host </> "patients" </> oid </> "anonymize/") m
-                                           liftIO $ print r
-
-                                           liftIO $ print $ r ^? responseBody . key "ID"
-                                           liftIO $ print $ r ^? responseBody . key "Path"
-                                           liftIO $ print $ r ^? responseBody . key "PatientID"
-                                           liftIO $ print $ r ^? responseBody . key "Type"
-
-                                           let anonymizedID = A.fromJSON <$> (r ^? responseBody . key "ID") :: Maybe (Result String)
-
-                                           return $ case anonymizedID of
-                                                Nothing                         -> Error $ "Could not parse ID in response: " ++ show r
-                                                Just (Error e)                  -> Error $ "Response error: " ++ e
-                                                Just (Success anonymizedID')    -> Success anonymizedID'
-
-flattenResultMaybe (Success (Just x)) = Success x
-flattenResultMaybe (Success Nothing)  = Error $ "Nothing"
-flattenResultMaybe (Error e)          = Error e
-
-flattenMaybeResult (Just (Success x)) = Success x
-flattenMaybeResult (Just (Error e))   = Error e
-flattenMaybeResult Nothing            = Error "Nothing"
-
-maybeToResult Nothing  = Error "Nothing"
-maybeToResult (Just x) = Success x
-
-successes = join . map successes'
-  where
-    successes' (Success x) = [x]
-    successes' _           = []
-
-getPatient' oid = do
-    p <- getPatient oid
-
-    let sleepMinutes = 1
-
-    case p of
-        Success p'  -> return p
-        Error e -> if isInfixOf "is not stable in Orthanc" e
-                        then do liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
-                                getPatient' oid
-                        else return $ Error e
-
-isSuccessTrue (Success True) = True
-isSuccessTrue _              = False
-
--- Construct anonymized patient map. Three things:
---
---     M.Map String String  -- original patient id to anonymized patient id
---     M.Map String String  -- original study id to anonymized study id
---     M.Map String String  -- original series id to anonymized series id
---
--- getAnonymizedPatientMap :: String -> ???
-getAnonymizedPatientMap :: String -> ReaderT MyTardisConfig IO (Result (M.Map String String, M.Map String String, M.Map String String))
-getAnonymizedPatientMap oid = do
-    anonp <- getPatient' oid
-
-    let originalPatientID = flattenResultMaybe (opAnonymizedFrom <$> anonp)
-
-    let anonStudyIDs = opStudies <$> anonp
-
-    _anonStudies   <- flattenResult <$> (traverse (mapM getStudy) anonStudyIDs)                                     :: ReaderT MyTardisConfig IO [Result OrthancStudy]
-    let anonStudies = filter (\x -> isSuccessTrue $ fmap (isJust . ostudyAnonymizedFrom) x)  _anonStudies
-
-    _anonSeries    <- (map join) <$> (mapM (traverse getSeries)   (join $ map (traverse ostudySeries) anonStudies)) :: ReaderT MyTardisConfig IO [Result OrthancSeries]
-    let anonSeries  = filter (\x -> isSuccessTrue $ fmap (isJust . oseriesAnonymizedFrom) x ) _anonSeries
-
-    let mapPatient = case anonp of
-                        Success anonp' -> case opAnonymizedFrom anonp' of
-                                            Just realPatientID  -> Success $ M.fromList [(realPatientID, opID anonp')]
-                                            Nothing             -> Error $ "This patient is not anonymized? " ++ show anonp
-                        Error e        -> Error e
-
-    let mapStudies = case allSuccesses anonStudies of
-                        Success _ -> Success $ M.fromList $ map (\s -> (fromJust (ostudyAnonymizedFrom s), ostudyID s))  (successes anonStudies) -- fromJust ok due to earlier filter
-                        Error e   -> Error e
-
-    let mapSeries = case allSuccesses anonSeries of
-                        Success _ -> Success $ M.fromList $ map (\s -> (fromJust (oseriesAnonymizedFrom s), oseriesID s)) (successes anonSeries) -- fromJust ok due to earlier filter
-                        Error e   -> Error e
-
-    return $ case (mapPatient, mapStudies, mapSeries) of
-        (Success mapPatient', Success mapStudies', Success mapSeries') -> Success (mapPatient', mapStudies', mapSeries')
-        (Error e, _, _)                                                -> Error e
-        (_, Error e, _)                                                -> Error e
-        (_, _, Error e)                                                -> Error e
-
-
--- FIXME have to wait for anonymized patient to stabilise?
-
-
-
-
-

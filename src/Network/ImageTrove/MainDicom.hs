@@ -199,91 +199,69 @@ uploadDicomAction opts origDir = do
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
                                                  liftIO $ getZonedTime >>= print
 
-                                                 -- Anonymize patients.
-                                                 let patients = S.toList $ S.fromList $ map (\(p, _, _, _, _) -> p) recentOgroups :: [OrthancPatient]
-                                                 forM_ patients $ \p -> reAnonymizePatient (opID p)
-
                                                  forM_ recentOgroups $ \(patient, study, series, oneInstance, tags) -> do
-                                                     -- Maps from original to anonymized IDs
-                                                     maps <- getAnonymizedPatientMap $ opID patient
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "getting series archive...."
+                                                     Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "got series archive."
 
-                                                     case maps of
-                                                        A.Error e -> liftIO $ putStrLn $ "Error: could not create anonymized-patient map: " ++ e
-                                                        A.Success (patientMap, studyMap, seriesMap) -> do
+                                                     liftIO $ print (tempDir, zipfile)
 
-                                                             anonPatient <- flattenMaybeResult <$> (traverse getPatient (M.lookup (opID patient)     patientMap)) :: ReaderT MyTardisConfig IO (A.Result OrthancPatient)
-                                                             anonStudy   <- flattenMaybeResult <$> (traverse getStudy   (M.lookup (ostudyID study)   studyMap))   :: ReaderT MyTardisConfig IO (A.Result OrthancStudy)
-                                                             anonSeries  <- flattenMaybeResult <$> (traverse getSeries  (M.lookup (oseriesID series) seriesMap))  :: ReaderT MyTardisConfig IO (A.Result OrthancSeries)
+                                                     Right linksDir <- liftIO $ unpackArchive tempDir zipfile
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
-                                                             case (anonPatient, anonStudy, anonSeries) of
-                                                                (A.Success anonPatient', A.Success anonStudy', A.Success anonSeries') -> uploadDicomActionFinal instrumentFilters instrumentMetadataFields experimentFields datasetFields schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators fp tz debug anonPatient' anonStudy' anonSeries'
-                                                                (A.Error e, _, _) -> liftIO $ putStrLn $ "Error: " ++ e
-                                                                (_, A.Error e, _) -> liftIO $ putStrLn $ "Error: " ++ e
-                                                                (_, _, A.Error e) -> liftIO $ putStrLn $ "Error: " ++ e
+                                                     createProjectGroup linksDir
 
-uploadDicomActionFinal instrumentFilters instrumentMetadataFields experimentFields datasetFields schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators fp tz debug patient study series = do
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "getting series archive...."
-    Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "got series archive."
+                                                     files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-    liftIO $ print (tempDir, zipfile)
+                                                     liftIO $ getZonedTime >>= print
+                                                     liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
+                                                     oneGroupResult <- uploadDicomAsMincOneGroup
+                                                         files
+                                                         instrumentFilters
+                                                         instrumentMetadataFields
+                                                         experimentFields
+                                                         datasetFields
+                                                         identifyExperiment
+                                                         identifyDataset
+                                                         identifyDatasetFile
+                                                         linksDir
+                                                         ( schemaExperiment
+                                                         , schemaDataset
+                                                         , schemaDicomFile
+                                                         , defaultInstitutionName
+                                                         , defaultInstitutionalDepartmentName
+                                                         , defaultInstitutionalAddress
+                                                         , defaultOperators)
 
-    Right linksDir <- liftIO $ unpackArchive tempDir zipfile
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
+                                                     let schemaFile = schemaDicomFile -- FIXME
 
-    createProjectGroup linksDir
+                                                     case oneGroupResult of
+                                                         (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
+                                                                 zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
 
-    files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+                                                                 case zipfile' of
+                                                                     A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
+                                                                                                          putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                                          removeRecursiveSafely tempDir
+                                                                                                          putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                                                          removeRecursiveSafely linksDir
+                                                                                                          putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
+                                                                                                          updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
+                                                                     A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
+                                                                                                          if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                                                                                           putStrLn $ "Not deleting links directory: " ++ linksDir
+                                                                                                                   else do putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                                                           removeRecursiveSafely tempDir
+                                                                                                                           putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                                                                           removeRecursiveSafely linksDir
 
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
-    oneGroupResult <- uploadDicomAsMincOneGroup
-        files
-        instrumentFilters
-        instrumentMetadataFields
-        experimentFields
-        datasetFields
-        identifyExperiment
-        identifyDataset
-        identifyDatasetFile
-        linksDir
-        ( schemaExperiment
-        , schemaDataset
-        , schemaDicomFile
-        , defaultInstitutionName
-        , defaultInstitutionalDepartmentName
-        , defaultInstitutionalAddress
-        , defaultOperators)
-
-    let schemaFile = schemaDicomFile -- FIXME
-
-    case oneGroupResult of
-        (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
-                zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
-
-                case zipfile' of
-                    A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
-                                                         putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                         removeRecursiveSafely tempDir
-                                                         putStrLn $ "Deleting links directory: " ++ linksDir
-                                                         removeRecursiveSafely linksDir
-                                                         putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
-                                                         updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
-                    A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                         if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                                          putStrLn $ "Not deleting links directory: " ++ linksDir
-                                                                  else do putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                          removeRecursiveSafely tempDir
-                                                                          putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                          removeRecursiveSafely linksDir
-
-                liftIO $ print zipfile'
-        (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
-        (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
-        (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
+                                                                 liftIO $ print zipfile'
+                                                         (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
+                                                         (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
+                                                         (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
     -- liftIO $ setCurrentDirectory origDir
     -- liftIO $ putStrLn $ "Writing new value to LastRun acid state: " ++ show nowZoned
