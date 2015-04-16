@@ -43,6 +43,7 @@ import Data.Dicom
 import Network.ImageTrove.Utils (computeChecksum)
 import Network.MyTardis.Types
 import Network.MyTardis.RestTypes
+import Network.ImageTrove.Utils (runShellCommand)
 
 import System.IO
 
@@ -956,13 +957,13 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
     let oneFile = headMay files
         filemetadata = (\f -> [(schemaFile, M.fromList
                                                 [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
-                                                , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
-                                                , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
+                                                -- , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
+                                                -- , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
                                                 , ("StudyDescription",  fromMaybe "(StudyDescription missing)"  $ dicomStudyDescription  f)
                                                 ]
                                )
                               ]) <$> oneFile
- 
+
     -- Pack the dicom files as Minc
     writeLog $ "Converting DICOM to Minc."
     dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
