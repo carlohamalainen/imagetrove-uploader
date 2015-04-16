@@ -976,8 +976,9 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
         (Success _, Success _, Nothing)              -> do return $ Error $ "Error when creating extracting file metadata. No files in DICOM group!"
 
 data FinalResult = BothOK
-                 | MincFileError String
+                 | MincFileError  String
                  | ThumbnailError String
+                 | NiftiError     String
                  deriving (Eq, Show)
 
 anyCatastrohpicErrors :: [(FinalResult, a, b)] -> Bool
@@ -991,7 +992,7 @@ finaliseMincFiles
     -> RestDataset  -- ^ Dataset that we are adding the file to.
     -> [(String, M.Map String String)] -- ^ File metadata map.
     -> (FilePath, [FilePath])           -- ^ Temporary directory containing MINC files; list of MINC files in that directory.
-    -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile))]
+    -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile), Either String (Result RestDatasetFile))]
 finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFiles) = do
     toMinc2Results <- liftIO $ forM mincFiles mncToMnc2 -- FIXME check results
 
@@ -1003,19 +1004,27 @@ finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFi
         thumbnail <- liftIO $ createMincThumbnail f
         writeLog $ "uploadDicomAsMinc: thumbnail: " ++ show thumbnail
 
+        nifti <- liftIO $ createNifti f
+        writeLog $ "uploadDicomAsMinc: nifti: " ++ show nifti
+
         dsft <- traverse (\thm -> uploadFileBasic schemaFile identifyDatasetFile d thm filemetadata) thumbnail
 
-        case (dsf, dsft) of
-            (Error e, _)                          -> do writeLog $ "Error while uploading file: " ++ e
+        niftiResult <- traverse (\n -> uploadFileBasic schemaFile identifyDatasetFile d n filemetadata) nifti
+
+        case (dsf, dsft, niftiResult) of
+            (Error e, _, _)                       -> do writeLog $ "Error while uploading file: " ++ e
                                                         writeLog $ "See also the directory: " ++ tempDir
-                                                        return (MincFileError e, dsf, dsft)
-            (Success dsf', Right (Success dsft')) -> do writeLog $ "Successfully uploaded file: " ++ f
-                                                        writeLog $ "Successfully uploaded thumbnail: " ++ show thumbnail
-                                                        return (BothOK, dsf, dsft)
-            (Success dsf', Right (Error e))       -> do writeLog $ "Error when creating thumbnail dataset file: " ++ e
-                                                        return (ThumbnailError e, dsf, dsft)
-            (Success dsf', Left e)                -> do writeLog $ "Error (http?) when creating thumbnail dataset file: " ++ e
-                                                        return (ThumbnailError e, dsf, dsft)
+                                                        return (MincFileError e, dsf, dsft, niftiResult)
+            (Success dsf', Right (Success dsft'), Right (Success niftiResult')) -> do writeLog $ "Successfully uploaded file: " ++ f
+                                                                                      writeLog $ "Successfully uploaded thumbnail: " ++ show thumbnail
+                                                                                      writeLog $ "Successfully uploaded nifti: " ++ show nifti
+                                                                                      return (BothOK, dsf, dsft, niftiResult)
+            (Success dsf', Right (Error e), _)    -> do writeLog $ "Error when creating thumbnail dataset file: " ++ e
+                                                        return (ThumbnailError e, dsf, dsft, niftiResult)
+            (Success dsf', Left e, _)             -> do writeLog $ "Error (http?) when creating thumbnail dataset file: " ++ e
+                                                        return (ThumbnailError e, dsf, dsft, niftiResult)
+            (Success dsf', Right _, Left e)       -> do writeLog $ "Error (http?) when creating nifti file: " ++ e
+                                                        return (NiftiError e, dsf, dsft, niftiResult)
 
     debug <- mytardisDebug <$> ask
 

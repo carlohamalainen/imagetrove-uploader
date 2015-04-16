@@ -109,6 +109,16 @@ createMincThumbnail mncFile = do
     case result of Right _ -> return $ Right mincThumbnail
                    Left e  -> return $ Left e
 
+createNifti :: FilePath -> IO (Either String FilePath)
+createNifti mncFile = do
+    let base = reverse . (drop 3) . reverse $ mncFile
+        niftiFile = base ++ "nii"
+
+    result <- runShellCommand "mnc2nii" [mncFile, niftiFile]
+
+    case result of Right _ -> return $ Right niftiFile
+                   Left e  -> return $ Left e
+
 parseField :: forall u. String -> ParsecT String u Identity String
 parseField prefix = do
     _ <- string prefix
