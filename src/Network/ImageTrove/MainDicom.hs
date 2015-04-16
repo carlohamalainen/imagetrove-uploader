@@ -448,9 +448,9 @@ identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalD
   where
     oneFile = headMay files
 
-    patientName       = join $ dicomPatientName       <$> oneFile
-    studyDescription  = join $ dicomStudyDescription  <$> oneFile
-    seriesDescription = join $ dicomSeriesDescription <$> oneFile
+    -- patientName       = join $ dicomPatientName       <$> oneFile
+    -- studyDescription  = join $ dicomStudyDescription  <$> oneFile
+    -- seriesDescription = join $ dicomSeriesDescription <$> oneFile
 
     description = "" -- FIXME What should this be?
 
