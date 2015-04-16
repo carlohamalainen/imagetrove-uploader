@@ -155,25 +155,30 @@ patientsToProcess fp ogroups hashAndLastUpdated = do
 
 anonymizeDicomFile :: FilePath -> IO (Either String String)
 anonymizeDicomFile f = do
-    runShellCommand "dcmodify" [ "-ie"
-                               , "-gin"
-                               , "-nb "
-                               , "-imt"
-                               , "-ea", "(0010,0010)" -- Patient Name
-                               , "-ea", "(0010,0030)" -- Patient birth date
-                               , "-ea", "(0008,0050)" -- Accession number
-                               , "-ea", "(0020,000D)" -- Study Instance UID
-                               , "-ea", "(0020,000E)" -- Series Instance UID
-                               , "-ea", "(0008,0018)" -- SOP Instance UID
-                               , "-ea", "(0008,0080)" -- Institution Name
-                               , "-ea", "(0008,0081)" -- Institution Address
-                               , "-ea", "(0008,1070)" -- Operator Name
-                               , "-ea", "(0008,1155)" -- Referenced SOP Instance UID
-                               , "-ea", "(0010,1000)" -- Other Patient Ids
-                               , "-ea", "(0020,0010)" -- Study ID
-                               , "-ea", "(0020,4000)" -- Image Comments
-                               , f
-                               ]
+    let cmd = "dcmodify"
+        opts = [ "-ie"
+               , "-gin"
+               , "-nb"
+               , "-imt"
+               , "-ea", "(0010,0010)" -- Patient Name
+               , "-ea", "(0010,0030)" -- Patient birth date
+               , "-ea", "(0008,0050)" -- Accession number
+               , "-ea", "(0020,000D)" -- Study Instance UID
+               , "-ea", "(0020,000E)" -- Series Instance UID
+               , "-ea", "(0008,0018)" -- SOP Instance UID
+               , "-ea", "(0008,0080)" -- Institution Name
+               , "-ea", "(0008,0081)" -- Institution Address
+               , "-ea", "(0008,1070)" -- Operator Name
+               , "-ea", "(0008,1155)" -- Referenced SOP Instance UID
+               , "-ea", "(0010,1000)" -- Other Patient Ids
+               , "-ea", "(0020,0010)" -- Study ID
+               , "-ea", "(0020,4000)" -- Image Comments
+               , f
+               ]
+
+    putStrLn $ "anonymizeDicomFile: " ++ show (cmd, opts)
+
+    runShellCommand cmd opts
 
 uploadDicomAction opts origDir = do
     -- Timezone:
