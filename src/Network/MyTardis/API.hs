@@ -21,6 +21,8 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.Mime
 import Network.Wreq
 
+import Data.Char (toLower, isAlphaNum)
+
 import qualified Network.Connection     as NetworkConnection
 import qualified Network.HTTP.Conduit   as NetworkHTTPConduit
 
@@ -953,6 +955,10 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
     d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
 
     let oneFile = headMay files
+        Just pid        = join (dicomPatientID         <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        Just studyDesc  = join (dicomStudyDescription  <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        Just seriesDesc = join (dicomSeriesDescription <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        seriesNr        = fromMaybe "(series)" $join (dicomSeriesNumber <$> oneFile)
         filemetadata = (\f -> [(schemaFile, M.fromList
                                                 [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
                                                 -- , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
@@ -967,11 +973,46 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
     dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
 
     case (e, d, filemetadata) of
-        (Success e', Success d', Just filemetadata') -> do traverse (finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata') dicom
-                                                           return $ Success (e, d)
+        (Success e', Success d', Just filemetadata') -> renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr dicom
         (Error expError, _, _)                       -> do return $ Error $ "Error when creating experiment: " ++ expError
         (Success _, Error dsError, _)                -> do return $ Error $ "Error when creating dataset: " ++ dsError
         (Success _, Success _, Nothing)              -> do return $ Error $ "Error when creating extracting file metadata. No files in DICOM group!"
+
+renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr (Left err) = return $ Error err
+renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr dicom@(Right (tempDir, _mincFiles)) = do
+    -- Rename the minc files to have study and series prefixes.
+    -- FIXME Surprising that 'rename' has type Filepath -> FilePath -> IO ()
+    -- How do we know if the rename worked!?
+    liftIO $ mapM (\f -> rename f (replacePatientName f)) _mincFiles
+
+    let mincFiles = map replacePatientName _mincFiles
+
+    finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' (tempDir, mincFiles)
+
+    -- FIXME This should depend on the earlier results!
+    return $ Success (e, d)
+
+  where
+    pid'        = filter isAlphaNum pid          -- FIXME Could be empty?
+    studyDesc'  = filter isAlphaNum studyDesc    -- FIXME Could be empty?
+    seriesDesc' = filter isAlphaNum seriesDesc   -- FIXME Could be empty?
+    seriesNr'   = if seriesNr == "(series)" then seriesNr else filter isAlphaNum seriesNr   -- FIXME Could be empty?
+
+    dropPatientName = drop (1 + length pid)
+    addPrefix f     = pid' ++ "_" ++ studyDesc' ++ "_" ++ seriesDesc' ++ "_" ++ seriesNr' ++ "_" ++ f
+
+    replacePatientName f = if (tidyName pid) `isPrefixOf` oldFileName
+                                then joinPath $ firstBits ++ [newFileName]
+                                else error $ "Unexpected MINC filename: " ++ show (pid, oldFileName, newFileName, f)
+       where bits        = splitPath f
+             firstBits   = take (length bits - 1) bits -- FIXME fails if path is empty...
+             oldFileName = last bits
+             newFileName = (addPrefix . dropPatientName) oldFileName
+
+             tidyName = map (toLower . dashToUnderscore)
+
+             dashToUnderscore '-' = '_'
+             dashToUnderscore c   = c
 
 data FinalResult = BothOK
                  | MincFileError  String
