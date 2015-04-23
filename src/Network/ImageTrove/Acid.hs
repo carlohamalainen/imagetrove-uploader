@@ -65,3 +65,15 @@ deleteLastUpdate fp hashes = do
     acid <- openLocalStateFrom fp (KeyValue Map.empty)
     _ <- update acid (DeleteKey hashes)
     closeAcidState acid
+
+
+-- Stuff to turn into a command line option
+_foo fp = do
+    m <- loadMap fp
+    let m' = Map.toList m
+
+    let someone = filter (\((p,_,_),_) -> p == "4837bc2a-557ab998-ee29fd37-bbe498a8-6b3430cc") m'
+
+    forM_ someone print
+
+    -- Also add option to delete a patient.
