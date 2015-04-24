@@ -497,7 +497,10 @@ identifyDataset schemaDataset datasetFields re files = let description = join (a
 
     experiments = [eiResourceURI re]
 
-    m           = M.fromList [ ("ManufacturerModelName", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile)) ]
+    m           = M.fromList [ ("Manufacturer Model Name", fromMaybe "(ManufacturerModelName missing)" (join $ dicomManufacturerModelName <$> oneFile))
+                             , ("Patient Name",            fromMaybe "(PatientName missing)"           (join $ dicomPatientName           <$> oneFile))
+                             , ("Study Date",              fromMaybe "(Study Date missing)"            (join $ dicomStudyDate             <$> oneFile))
+                             ]
 
 identifyDatasetFile :: RestDataset -> String -> String -> Integer -> [(String, M.Map String String)] -> IdentifiedFile
 identifyDatasetFile rds filepath md5sum size metadata = IdentifiedFile
