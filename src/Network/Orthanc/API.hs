@@ -226,8 +226,8 @@ getPatient oid = do
                          case opIsStable <$> p of
                             Success True    -> p
                             Success False   -> Error $ "Patient " ++ oid ++ " is not stable in Orthanc."
-                            Error   e       -> Error e
-        Nothing     -> Error "Could not decode resource."
+                            Error   e       -> Error $ "Could not get patient " ++ oid ++ ", error: " ++ e
+        Nothing     -> Error $ "Could not decode resource for patient " ++ oid
 
 getStudy :: String -> ReaderT MyTardisConfig IO (Result OrthancStudy)
 getStudy sid = do
@@ -240,8 +240,8 @@ getStudy sid = do
                          case ostudyIsStable <$> s of
                             Success True    -> s
                             Success False   -> Error $ "Study " ++ sid ++ " is not stable in Orthanc."
-                            Error   e       -> Error e
-        Nothing     -> Error "Could not decode resource."
+                            Error   e       -> Error $ "Could not get study " ++ sid ++ ", error: " ++ e
+        Nothing     -> Error $ "Could not decode resource for study " ++ sid
 
 getSeries :: String -> ReaderT MyTardisConfig IO (Result OrthancSeries)
 getSeries sid = do
@@ -254,8 +254,8 @@ getSeries sid = do
                          case oseriesIsStable <$> s of
                             Success True    -> s
                             Success False   -> Error $ "Series " ++ sid ++ " is not stable in Orthanc."
-                            Error   e       -> Error e
-        Nothing     -> Error "Could not decode resource."
+                            Error   e       -> Error $ "Could not get series " ++ sid ++ ", error: " ++ e
+        Nothing     -> Error $ "Could not decode resource for study " ++ sid
 
 getInstance :: String -> ReaderT MyTardisConfig IO (Result OrthancInstance)
 getInstance iid = do
@@ -265,7 +265,7 @@ getInstance iid = do
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
-        Nothing     -> Error "Could not decode resource."
+        Nothing     -> Error $ "Could not decode resource for instance " ++ iid
 
 getTags :: String -> ReaderT MyTardisConfig IO (Result OrthancTags)
 getTags iid = do
@@ -275,7 +275,7 @@ getTags iid = do
 
     return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
         Just v      -> fromJSON v
-        Nothing     -> Error "Could not decode resource."
+        Nothing     -> Error $ "Could not decode resource for instance " ++ iid
 
 getPatientsStudies :: OrthancPatient -> ReaderT MyTardisConfig IO [Result OrthancStudy]
 getPatientsStudies patient = mapM getStudy $ opStudies patient
@@ -332,8 +332,10 @@ extendWithOneInstance (patient, study, series) = do
     case oneInstance of
         (Just (Success oneInstance')) -> return [(patient, study, series, oneInstance')]
         (Just (Error e))              -> do writeLog $ "Error while retrieving single instance: " ++ e
+                                            writeLog $ "We were trying to retrieve: " ++ show (patient, study, series)
                                             return []
         (Nothing)                     -> do writeLog $ "Warning: got Nothing when trying to retrieve single instance of series: " ++ show series
+                                            writeLog $ "We were trying to retrieve: " ++ show (patient, study, series)
                                             return []
 
 extendWithTags (patient, study, series, oneInstance) = do
@@ -365,7 +367,7 @@ getSeriesArchive sid = do
                                         BL.writeFile zipfile body
                                         return $ Right (tempDir, zipfile))
                                     (\e -> return $ Left $ show (e :: IOException))
-        Nothing   -> return $ Left "Error: empty response body in getSeriesArchive."
+        Nothing   -> return $ Left $ "Error: empty response body in getSeriesArchive for series " ++ sid
 
 unpackArchive :: FilePath -> FilePath -> IO (Either String FilePath)
 unpackArchive tempDir zipfile = catch
