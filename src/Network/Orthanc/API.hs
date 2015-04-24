@@ -101,8 +101,7 @@ instance FromJSON OrthancStudy where
     parseJSON _          = mzero
 
 data OrthancSeries = OrthancSeries
-    { oseriesExpectedNumberOfInstances    :: Maybe Integer
-    , oseriesID :: String
+    { oseriesID :: String
     , oseriesInstances :: [String]
     , oseriesIsStable :: Bool
     , oseriesLastUpdate :: String
@@ -116,7 +115,6 @@ data OrthancSeries = OrthancSeries
 
 instance FromJSON OrthancSeries where
     parseJSON (Object v) = OrthancSeries <$>
-        v .: "ExpectedNumberOfInstances" <*>
         v .: "ID"                        <*>
         v .: "Instances"                 <*>
         v .: "IsStable"                  <*>
