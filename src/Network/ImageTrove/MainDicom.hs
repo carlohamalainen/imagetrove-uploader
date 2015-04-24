@@ -390,7 +390,7 @@ imageTroveMain = do
         orthHost = "http://localhost:8043"
         debug    = optDebug opts'
 
-    mytardisOpts <- getConfig host orthHost f Nothing debug
+    mytardisOpts <- getConfig host orthHost f debug
 
     case mytardisOpts of
         (Just mytardisOpts') -> runReaderT (dostuff opts') mytardisOpts'
@@ -559,13 +559,12 @@ grabMetadata file = map oops $ concatMap f metadata
 
 
 
-getConfig :: String -> String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
-getConfig host orthHost f defaultLogfile debug = do
+getConfig :: String -> String -> FilePath -> Bool -> IO (Maybe MyTardisConfig)
+getConfig host orthHost f debug = do
     cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
-    logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
 
     ohost <- lookup cfg "orthanc_host" :: IO (Maybe String)
     let ohost' = if isNothing ohost then orthHost else fromJust ohost
@@ -573,15 +572,10 @@ getConfig host orthHost f defaultLogfile debug = do
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
-    let logfile' = if isNothing logfile then defaultLogfile else logfile
-
-    h <- traverse (\l -> do h <- openFile l AppendMode
-                            hSetBuffering h LineBuffering
-                            return h)
-                  logfile'
+    hSetBuffering stdin NoBuffering
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h ohost' mytardisDir' debug
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug
         _                        -> Nothing
 
 readInstrumentConfigs

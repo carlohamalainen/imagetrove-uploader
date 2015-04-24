@@ -54,8 +54,7 @@ import Data.Time.LocalTime (getZonedTime)
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
     now <- liftIO $ show <$> getZonedTime
-    MyTardisConfig _ _ _ _ _ logfile _ _ _ <- ask
-    liftIO $ traverse (`hPutStrLn` (now ++ " :: " ++ msg)) logfile
+    liftIO $ putStrLn (now ++ " :: " ++ msg)
     return ()
 
 data MyTardisConfig = MyTardisConfig
@@ -75,12 +74,11 @@ data MyTardisConfig = MyTardisConfig
 defaultMyTardisOptions :: String -- ^ MyTARDIS host URL.
                        -> String -- ^ Username
                        -> String -- ^ Password
-                       -> Maybe Handle -- ^ Log file.
                        -> String -- ^ Orthanc host URL.
                        -> String -- ^ MyTARDIS storage directory.
                        -> Bool   -- ^ Debug mode.
                        -> MyTardisConfig
-defaultMyTardisOptions host user pass logfile orthHost mytardisDir debug = MyTardisConfig host "/api/v1" user pass opts logfile orthHost mytardisDir debug
+defaultMyTardisOptions host user pass orthHost mytardisDir debug = MyTardisConfig host "/api/v1" user pass opts Nothing orthHost mytardisDir debug
   where
     opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
     optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
@@ -95,14 +93,14 @@ defaultMyTardisOptions host user pass logfile orthHost mytardisDir debug = MyTar
 -- | Wrapper around Wreq's 'postWith' that uses our settings in a 'ReaderT'.
 postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 postWith' x v = do
-    MyTardisConfig host apiBase user pass opts logfile _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ <- ask
     writeLog $ "postWith': " ++ show (x, v)
     liftIO $ postWith opts (host ++ apiBase ++ x) v
 
 -- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 putWith' x v = do
-    MyTardisConfig host apiBase user pass opts logfile _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ <- ask
     writeLog $ "putWith': " ++ show (x, v)
     liftIO $ putWith opts (host ++ apiBase ++ x) v
 
@@ -614,21 +612,21 @@ deleteExperiment x = do
 deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response ())
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
-    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
 deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response ())
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
-    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsfResourceURI x
 
 -- | Delete a parameter.
 deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response ())
 deleteParameter x = do
     writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
-    MyTardisConfig host apiBase _ _ opts logfile _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ epResourceURI x
 
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment

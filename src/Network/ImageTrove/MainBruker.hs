@@ -83,26 +83,20 @@ pUploaderOptions = UploaderOptions
     x    = cmd1
     cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
 
-getConfig :: String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
-getConfig host f defaultLogfile debug = do
+getConfig :: String -> FilePath -> Bool -> IO (Maybe MyTardisConfig)
+getConfig host f debug = do
     cfg <- load [Optional f]
 
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
-    logfile <- lookup cfg "logfile" :: IO (Maybe FilePath)
 
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
-    let logfile' = if isNothing logfile then defaultLogfile else logfile
-
-    h <- traverse (\l -> do h <- openFile l AppendMode
-                            hSetBuffering h LineBuffering
-                            return h)
-                  logfile'
+    hSetBuffering stdin NoBuffering
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' h "http://127.0.0.1:8443" mytardisDir' debug
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug
         _                        -> Nothing
 
 readInstrumentConfigs
@@ -560,7 +554,7 @@ imageTroveMain = do
         config   = optConfigFile opts'
         debug    = optDebug opts'
 
-    mytardisOpts <- getConfig host config Nothing debug
+    mytardisOpts <- getConfig host config debug
 
     case mytardisOpts of
         (Just mytardisOpts') -> runReaderT (dostuff config) mytardisOpts'
