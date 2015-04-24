@@ -130,7 +130,6 @@ data OrthancInstance = OrthancInstance
     { oinstFileSize :: Integer
     , oinstFileUuid :: String
     , oinstID :: String
-    , oinstIndexInSeries :: Integer
     , oinstMainDicomTags :: M.Map String String
     , oinstParentSeries :: String
     , oinstType :: String
@@ -143,7 +142,6 @@ instance FromJSON OrthancInstance where
         v .: "FileSize"                    <*>
         v .: "FileUuid"                    <*>
         v .: "ID"                          <*>
-        v .: "IndexInSeries"               <*>
         v .: "MainDicomTags"               <*>
         v .: "ParentSeries"                <*>
         v .: "Type"                        <*>
