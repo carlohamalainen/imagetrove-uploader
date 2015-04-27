@@ -208,11 +208,11 @@ identifyBrukerExperiment schemaExperiment institution institutionalDepartmentNam
 
                                    m = M.fromList $ m1 ++ m2
 
-                               return $ Right $ IdentifiedExperiment desc institution title [(schemaExperiment, m)]
+                               return $ Right $ IdentifiedExperiment desc institution projectID' [(schemaExperiment, m)]
 
   where
     desc            = "" -- FIXME What should this be?
-    title           = last $ splitDirectories dir
+    -- title           = last $ splitDirectories dir
 
 getLastChangedTime :: FilePath -> IO UTCTime
 getLastChangedTime x = do
@@ -271,7 +271,7 @@ brukerToMinc tempDir dir = do
 
     -- The series directories are directory names that are numbers. We have to process
     -- them individually because pvconv blows up and gives up if it can't handle one of them.
-    series <- (filter isNumber) <$> getDirectoryContents "."
+    series <- (filter isNumber) <$> getDirectoryContents dir
 
     putStrLn $ "brukerToMinc: found these series directories: " ++ show series
 
@@ -281,10 +281,13 @@ brukerToMinc tempDir dir = do
         let cmd     = pvconvScript
             args    = ["-series", s, title, "-verbose", "-outtype", "minc", "-outdir", tempDir]
 
-        putStrLn $ "Running: " ++ show (cmd, args)
-        _ <- runShellCommand' cmd args
+        cwd <- getCurrentDirectory
+        putStrLn $ "Running: " ++ show (cmd, args) ++ " in directory " ++ cwd
 
-        setCurrentDirectory oldCwd
+        x <- runShellCommand' cmd args
+        putStrLn $ "Output: " ++ show x
+
+    setCurrentDirectory oldCwd
 
     return tempDir
 
@@ -357,6 +360,9 @@ stage3a :: FilePath -> String -> String -> String -> FilePath -> ReaderT MyTardi
 stage3a mincTempDir schemaExperiment schemaDataset schemaFile dir = do
     mincDir     <- liftIO $ brukerToMinc mincTempDir dir
     mincFiles   <- liftIO $ mincFilesInDir mincDir
+
+    liftIO $ putStrLn $ "stage3a: got these Minc files: " ++ show mincFiles
+
     return $ Right mincFiles
 
 -- Create thumbnails of MINC files.
@@ -386,10 +392,13 @@ stage5 ie' = do
         A.Success e'    -> Right $ e'
 
 -- Identify the dataset.
-stage6 :: String -> RestExperiment -> ReaderT MyTardisConfig IO (Either BrukerUploadError RestDataset)
-stage6 schemaDataset e' = do
+stage6 :: String -> FilePath -> RestExperiment -> ReaderT MyTardisConfig IO (Either BrukerUploadError RestDataset)
+stage6 schemaDataset dir e' = do
+
+    let title = last $ splitDirectories dir
+
     let ids = IdentifiedDataset
-                "Bruker dataset"
+                title
                 [eiResourceURI e']
                 [(schemaDataset, Map.empty)]
     ds <- createDataset ids
@@ -499,7 +508,7 @@ processBrukerExperiment' instrumentConfig dir = do
     ie              <- stage4 schemaExperiment institution institutionalDepartmentName institutionAddress operators dir
     e               <- joinEither <$> traverse stage5 ie
 
-    ds              <- joinEither <$> traverse (stage6 schemaDataset) e
+    ds              <- joinEither <$> traverse (stage6 schemaDataset dir) e
 
     let (+++) a b c = a ++ b ++ c
         files = (+++) <$> (pure <$> tarball) <*> mincFiles <*> thumbnails
