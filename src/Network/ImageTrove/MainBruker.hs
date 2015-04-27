@@ -111,7 +111,7 @@ getConfig host f debug = do
 
 readInstrumentConfigs
   :: FilePath
-     -> IO [(Maybe FilePath, Maybe String, String, [String], String, String, String, String, String, String, FilePath)]
+     -> IO [(Maybe FilePath, Maybe String, Maybe FilePath, [String], String, String, String, String, String, String, FilePath)]
 readInstrumentConfigs f = do
     cfg <- load [Required f]
 
@@ -124,7 +124,7 @@ readInstrumentConfigs f = do
 readInstrumentConfig
   :: Config
        -> T.Text
-       -> IO (Maybe FilePath, Maybe String, String, [String], String, String, String, String, String, String, FilePath)
+       -> IO (Maybe FilePath, Maybe String, Maybe FilePath, [String], String, String, String, String, String, String, FilePath)
 readInstrumentConfig cfg instrumentName = do
     topLevelDirectory                   <- lookup cfg (instrumentName `T.append` ".top_level_directory")
     subdirectory                        <- lookup cfg (instrumentName `T.append` ".subdirectory")
@@ -142,8 +142,6 @@ readInstrumentConfig cfg instrumentName = do
 
     tempDirectory    <- fromMaybe "/tmp" <$> lookup cfg (instrumentName `T.append` ".temp_directory")
 
-    when (isNothing processedDirectory) $ error $ "Bad/missing 'processed_directory' field for "       ++ T.unpack instrumentName
-
     when (isNothing defaultOperators)                    $ error $ "Bad/missing 'default_operators"                     ++ T.unpack instrumentName
 
     when (isNothing defaultInstitutionName)              $ error $ "Bad/missing 'default_institution_name"              ++ T.unpack instrumentName
@@ -155,7 +153,7 @@ readInstrumentConfig cfg instrumentName = do
     when (isNothing schemaFile)       $ error $ "Bad/missing 'schema_file' field for "       ++ T.unpack instrumentName
 
     case ( topLevelDirectory, processedDirectory, defaultOperators , defaultInstitutionName , defaultInstitutionalDepartmentName , defaultInstitutionalAddress , schemaExperiment , schemaDataset , schemaFile) of
-        ( topLevelDirectory', Just processedDirectory', Just defaultOperators' , Just defaultInstitutionName' , Just defaultInstitutionalDepartmentName' , Just defaultInstitutionalAddress' , Just schemaExperiment' , Just schemaDataset' , Just schemaFile') -> return (topLevelDirectory', subdirectory, processedDirectory', defaultOperators', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', schemaExperiment', schemaDataset', schemaFile', tempDirectory)
+        ( topLevelDirectory', processedDirectory', Just defaultOperators' , Just defaultInstitutionName' , Just defaultInstitutionalDepartmentName' , Just defaultInstitutionalAddress' , Just schemaExperiment' , Just schemaDataset' , Just schemaFile') -> return (topLevelDirectory', subdirectory, processedDirectory', defaultOperators', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', schemaExperiment', schemaDataset', schemaFile', tempDirectory)
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
 -- | Is this a directory?
@@ -478,13 +476,13 @@ safeMove topDir dir destination = do
 
 
 
-processBrukerExperiment' :: (Maybe FilePath, Maybe FilePath, FilePath, [String], String, String, String, String, String, String, FilePath) -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError [(FilePath, A.Result RestDatasetFile)])
+processBrukerExperiment' :: (Maybe FilePath, Maybe FilePath, Maybe FilePath, [String], String, String, String, String, String, String, FilePath) -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError [(FilePath, A.Result RestDatasetFile)])
 processBrukerExperiment' instrumentConfig dir = do
     let (_topLevelDirectory, subdirectory, processedDirectory, operators, institution, institutionalDepartmentName, institutionAddress, schemaExperiment, schemaDataset, schemaFile, tmp) = instrumentConfig
 
     let topLevelDirectory = fromMaybe "." _topLevelDirectory
 
-    liftIO $ when (isNothing $ getTopLevelDirectory iconfig) $ putStrLn $ "Using current directory as top-level directory since none supplied in the config file."
+    liftIO $ when (isNothing $ getTopLevelDirectory instrumentConfig) $ putStrLn $ "Using current directory as top-level directory since none supplied in the config file."
 
     tarballTempDir <- liftIO $ createTempDirectory tmp "bruker_experiment"
     mincTempDir    <- liftIO $ createTempDirectory tmp "bruker_to_minc"
@@ -601,10 +599,11 @@ doInstrument iconfig = do
         processedDir    = getProcessedDirectory iconfig
 
     liftIO $ when (isNothing $ getTopLevelDirectory iconfig) $ putStrLn $ "Using current directory as top-level directory since none supplied in the config file."
+    liftIO $ when (isNothing $ processedDir)                 $ putStrLn $ "Processed directory not specified in config file; will not move experiments."
 
     liftIO $ putStrLn $ "doInstrument: topDir: "       ++ topDir
     liftIO $ putStrLn $ "doInstrument: subDir: "       ++ show subDir
-    liftIO $ putStrLn $ "doInstrument: processedDir: " ++ processedDir
+    liftIO $ putStrLn $ "doInstrument: processedDir: " ++ show processedDir
 
     -- topDir like: /data/home/uqchamal/mounts/bio94t/opt/imagetrove/archive_PV5.1
 
@@ -623,7 +622,7 @@ doInstrument iconfig = do
 
     liftIO $ putStrLn $ "doInstrument: stable: " ++ show stable
 
-    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir (Just processedDir)
+    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir processedDir
 
 doExperiment iconfig dir topDir subDir processedDir = do
     liftIO $ putStrLn $ "Processing: " ++ dir
@@ -640,7 +639,7 @@ doExperiment iconfig dir topDir subDir processedDir = do
                              putStrLn $ "Now attempting safe copy to move to processed directory."
 
                              case processedDir of
-                                Nothing            -> putStrLn $ "Not moving experiment directory."
+                                Nothing            -> putStrLn $ "processedDir == Nothing; Not moving experiment directory."
                                 Just processedDir' -> do y <- safeMove topDir dir processedDir'
                                                          case y of Right _      -> putStrLn $ "Successfully moved experiment to " ++ processedDir'
                                                                    err@(Left _) -> putStrLn $ "Error while moving experiment to processed directory: " ++ show err
