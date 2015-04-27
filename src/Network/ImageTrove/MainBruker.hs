@@ -59,9 +59,14 @@ import qualified Data.Map as Map
 import System.Unix.Directory (removeRecursiveSafely)
 
 data Command = CmdUploadAll UploadAllOptions
+             | CmdUploadOne UploadOneOptions
     deriving (Eq, Show)
 
 data UploadAllOptions = UploadAllOptions deriving (Eq, Show)
+
+data UploadOneOptions = UploadOneOptions {
+    optUploadOneDirectory   :: FilePath
+    } deriving (Eq, Show)
 
 data UploaderOptions = UploaderOptions
     { optHost           :: Maybe String
@@ -74,6 +79,9 @@ data UploaderOptions = UploaderOptions
 pUploadAllOptions :: Parser Command
 pUploadAllOptions = CmdUploadAll <$> (pure UploadAllOptions)
 
+pUploadOneOptions :: Parser Command
+pUploadOneOptions = CmdUploadOne <$> UploadOneOptions <$> strOption (long "bruker-experiment-dir" <> help "Directory containing Bruker experiment.")
+
 pUploaderOptions :: Parser UploaderOptions
 pUploaderOptions = UploaderOptions
     <$> optional (strOption (long "host"          <> metavar "HOST"      <> help "MyTARDIS host URL, e.g. http://localhost:8000"))
@@ -81,8 +89,9 @@ pUploaderOptions = UploaderOptions
     <*>          (switch    (long "debug"                                <> help "Debug mode."))
     <*> subparser x
   where
-    x    = cmd1
+    x    = cmd1 <> cmd2
     cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
+    cmd2 = command "upload-one"               (info (helper <*> pUploadOneOptions) (progDesc "Upload one experiment."))
 
 getConfig :: String -> FilePath -> Maybe FilePath -> Bool -> IO (Maybe MyTardisConfig)
 getConfig host f defaultLogfile debug = do
@@ -577,7 +586,7 @@ imageTroveMain = do
     mytardisOpts <- getConfig host config Nothing debug
 
     case mytardisOpts of
-        (Just mytardisOpts') -> runReaderT (dostuff config) mytardisOpts'
+        (Just mytardisOpts') -> runReaderT (dostuffTop config opts') mytardisOpts'
         _                    -> error $ "Could not read config file: " ++ config
 
   where
@@ -615,7 +624,7 @@ doInstrument iconfig = do
 
     liftIO $ putStrLn $ "doInstrument: stable: " ++ show stable
 
-    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir processedDir
+    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir (Just processedDir)
 
 doExperiment iconfig dir topDir subDir processedDir = do
     liftIO $ putStrLn $ "Processing: " ++ dir
@@ -630,11 +639,62 @@ doExperiment iconfig dir topDir subDir processedDir = do
       Left (BrukerNoProjectID s)                         -> liftIO $ putStrLn $ "Error: could not find project ID in subject file: " ++ s
       Right _ -> liftIO $ do putStrLn $ "Processed: " ++ dir
                              putStrLn $ "Now attempting safe copy to move to processed directory."
-                             y <- safeMove topDir dir processedDir
-                             case y of Right _      -> putStrLn $ "Successfully moved experiment to " ++ processedDir
-                                       err@(Left _) -> putStrLn $ "Error while moving experiment to processed directory: " ++ show err
 
-dostuff configFile = do
+                             case processedDir of
+                                Nothing            -> putStrLn $ "Not moving experiment directory."
+                                Just processedDir' -> do y <- safeMove topDir dir processedDir'
+                                                         case y of Right _      -> putStrLn $ "Successfully moved experiment to " ++ processedDir'
+                                                                   err@(Left _) -> putStrLn $ "Error while moving experiment to processed directory: " ++ show err
+
+dostuffTop configFile opts = do
+    let cmd = optCommand opts
+
+    case cmd of
+        CmdUploadAll _       -> dostuffAll configFile
+        CmdUploadOne oneOpts -> dostuffOne configFile oneOpts
+
+    return undefined
+
+dostuffOne :: FilePath -> UploadOneOptions -> ReaderT MyTardisConfig IO ()
+dostuffOne configFile opts = do
+
+    instrumentConfigs <- liftIO $ readInstrumentConfigs configFile
+
+    liftIO $ putStrLn $ "dostuffOne: only using first instrument from " ++ configFile
+
+    let iconfig = head instrumentConfigs -- FIXME can fail, use headMay instead.
+
+    let topDir          = optUploadOneDirectory opts
+        subDir          = getSubdirectory iconfig
+        processedDir    = Nothing :: Maybe FilePath
+
+    liftIO $ putStrLn $ "doInstrument: topDir: "       ++ topDir
+    liftIO $ putStrLn $ "doInstrument: subDir: "       ++ show subDir
+    liftIO $ putStrLn $ "doInstrument: processedDir: " ++ (show processedDir)
+
+    -- Each user has a directory under the top directory.
+    userDirs <- liftIO $ getDirs topDir -- ["uqchamal", "uqytesir", ...]
+
+    possibleExperimentDirs <- liftIO $ case (userDirs, subDir) of
+        (Right userDirs', Just subDir')     -> forM [topDir </> ud </> subDir' | ud <- userDirs'] getDirs >>= (return . concat . rights)
+        (Right userDirs', Nothing)          -> forM [topDir </> ud             | ud <- userDirs'] getDirs >>= (return . concat . rights)
+        _                                   -> return []
+
+    let foo (Right True) = True
+        foo _            = False
+
+    -- Here, since the user is doing things manually, we
+    -- assume that the directory is stable.
+    let stable = possibleExperimentDirs
+
+    liftIO $ putStrLn $ "doInstrument: stable: " ++ show stable
+
+    -- forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir (Just processedDir)
+
+    liftIO $ forM_ stable $ \dir -> print dir
+
+
+dostuffAll configFile = do
     origDir <- liftIO getCurrentDirectory
     forever $ do liftIO $ setCurrentDirectory origDir
 
