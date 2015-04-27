@@ -661,25 +661,17 @@ dostuffOne configFile opts = do
     liftIO $ putStrLn $ "dostuffOne: only using first instrument from " ++ configFile
 
     let iconfig = head instrumentConfigs -- FIXME can fail, use headMay instead.
-
-    let topDir          = optUploadOneDirectory opts
         subDir          = getSubdirectory iconfig
         processedDir    = Nothing :: Maybe FilePath
 
+    let topDir = joinPath . reverse . tail . reverse . splitDirectories $ (optUploadOneDirectory opts) -- FIXME Can break.
+
     liftIO $ putStrLn $ "doInstrument: topDir: "       ++ topDir
+    liftIO $ putStrLn $ "doInstrument: directory: "    ++ optUploadOneDirectory opts
     liftIO $ putStrLn $ "doInstrument: subDir: "       ++ show subDir
     liftIO $ putStrLn $ "doInstrument: processedDir: " ++ (show processedDir)
 
-    -- Each user has a directory under the top directory.
-    userDirs <- liftIO $ getDirs topDir -- ["uqchamal", "uqytesir", ...]
-
-    possibleExperimentDirs <- liftIO $ case (userDirs, subDir) of
-        (Right userDirs', Just subDir')     -> forM [topDir </> ud </> subDir' | ud <- userDirs'] getDirs >>= (return . concat . rights)
-        (Right userDirs', Nothing)          -> forM [topDir </> ud             | ud <- userDirs'] getDirs >>= (return . concat . rights)
-        _                                   -> return []
-
-    let foo (Right True) = True
-        foo _            = False
+    let possibleExperimentDirs = [ optUploadOneDirectory opts ]
 
     -- Here, since the user is doing things manually, we
     -- assume that the directory is stable.
@@ -687,10 +679,7 @@ dostuffOne configFile opts = do
 
     liftIO $ putStrLn $ "doInstrument: stable: " ++ show stable
 
-    -- forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir (Just processedDir)
-
-    liftIO $ forM_ stable $ \dir -> print dir
-
+    forM_ stable $ \dir -> doExperiment iconfig dir topDir subDir Nothing
 
 dostuffAll configFile = do
     origDir <- liftIO getCurrentDirectory
