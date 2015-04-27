@@ -201,7 +201,7 @@ identifyBrukerExperiment schemaExperiment institution institutionalDepartmentNam
         Right projectID' -> do let m1 = [ ("InstitutionName",             institution)
                                         , ("InstitutionalDepartmentName", institutionalDepartmentName)
                                         , ("InstitutionAddress",          institutionAddress)
-                                        , ("Project",                     show projectID')
+                                        , ("Project",                     projectID')
                                         ]
 
                                    m2 = [("Operator", intercalate " " operators)]
