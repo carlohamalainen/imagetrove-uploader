@@ -19,9 +19,9 @@ data RestExperimentMeta = RestExperimentMeta
 instance FromJSON RestExperimentMeta where
     parseJSON (Object v) = RestExperimentMeta <$>
         v .: "limit" <*>
-        v .: "next" <*>
+        v .:? "next" <*>
         v .: "offset" <*>
-        v .: "previous" <*>
+        v .:? "previous" <*>
         v .: "total_count"
     parseJSON _          = mzero
 
