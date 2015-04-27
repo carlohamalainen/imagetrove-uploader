@@ -374,6 +374,15 @@ stage3b mincFiles = do
 
     return $ Right $ rights thumbnails
 
+-- Create Nifti versions of the MINC files.
+stage3c mincFiles = do
+    niftis <- liftIO $ forM mincFiles createNifti
+
+    -- We don't mind if some of these fail?...
+    forM_ (lefts niftis) $ \nerr -> liftIO $ putStrLn $ "Error when creating Nifti files: " ++ nerr
+
+    return $ Right $ rights niftis
+
 -- Identify the experiment (preparation for creating an actual experiment).
 stage4 :: String -> String -> String -> String -> [String] -> FilePath -> ReaderT MyTardisConfig IO (Either BrukerUploadError IdentifiedExperiment)
 stage4 schemaExperiment institution institutionalDepartmentName institutionAddress operators dir = do
@@ -504,14 +513,15 @@ processBrukerExperiment' instrumentConfig dir = do
     tarball         <- stage3  tarballTempDir schemaExperiment schemaDataset schemaFile dir
     mincFiles       <- stage3a mincTempDir schemaExperiment schemaDataset schemaFile dir
     thumbnails      <- joinEither <$> traverse stage3b mincFiles
+    nifties         <- joinEither <$> traverse stage3c mincFiles
 
     ie              <- stage4 schemaExperiment institution institutionalDepartmentName institutionAddress operators dir
     e               <- joinEither <$> traverse stage5 ie
 
     ds              <- joinEither <$> traverse (stage6 schemaDataset dir) e
 
-    let (+++) a b c = a ++ b ++ c
-        files = (+++) <$> (pure <$> tarball) <*> mincFiles <*> thumbnails
+    let (+++) a b c d = a ++ b ++ c ++ d
+        files = (+++) <$> (pure <$> tarball) <*> mincFiles <*> thumbnails <*> nifties
 
     -- If the tarball isn't there then we give up. Other files,
     -- such as MINCs and thumbnails, are optional.
