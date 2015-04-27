@@ -9,6 +9,7 @@ import Control.Exception.Base (catch, IOException(..))
 import Control.Monad.Reader
 import Control.Monad (forever, when)
 import Control.Concurrent (threadDelay)
+import Data.Char (isDigit)
 import Data.Configurator
 import Data.Configurator.Types
 import Data.Monoid (mempty)
@@ -246,6 +247,9 @@ tarBrukerDirectory tempDir dir = do
 
 pvconvScript = "/data/home/uqchamal/perl5/bin/pvconv.pl" -- FIXME make parameter? Why is the path broken?
 
+isNumber :: String -> Bool
+isNumber = all isDigit
+
 brukerToMinc :: FilePath -> FilePath -> IO FilePath
 brukerToMinc tempDir dir = do
     let up      = joinPath . reverse . tail . reverse . splitDirectories $ dir -- FIXME Can break.
@@ -257,14 +261,24 @@ brukerToMinc tempDir dir = do
     print ("title", title)
 
     setCurrentDirectory up -- FIXME catch exception?
+    putStrLn $ "brukerToMinc: working in directory: " ++ up
 
-    let cmd     = pvconvScript
-        args    = [title, "-verbose", "-all", "-outtype", "minc", "-outdir", tempDir]
+    -- The series directories are directory names that are numbers. We have to process
+    -- them individually because pvconv blows up and gives up if it can't handle one of them.
+    series <- (filter isNumber) <$> getDirectoryContents "."
 
-    putStrLn $ "Running: " ++ show (cmd, args)
-    _ <- runShellCommand' cmd args
+    putStrLn $ "brukerToMinc: found these series directories: " ++ show series
 
-    setCurrentDirectory oldCwd
+    -- FIXME No good error handling here!
+
+    forM_ series $ \s -> do
+        let cmd     = pvconvScript
+            args    = ["-series", s, title, "-verbose", "-outtype", "minc", "-outdir", tempDir]
+
+        putStrLn $ "Running: " ++ show (cmd, args)
+        _ <- runShellCommand' cmd args
+
+        setCurrentDirectory oldCwd
 
     return tempDir
 
