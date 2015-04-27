@@ -50,11 +50,14 @@ import Network.ImageTrove.Acid
 import qualified Data.Map as Map
 
 data Command
-    = CmdUploadAll       UploadAllOptions
-    | CmdUploadOne       UploadOneOptions
-    | CmdShowExperiments ShowExperimentsOptions
-    | CmdUploadFromDicomServer UploadFromDicomServerOptions
+    = CmdUploadAll              UploadAllOptions
+    | CmdUploadOne              UploadOneOptions
+    | CmdShowExperiments        ShowExperimentsOptions
+    | CmdUploadFromDicomServer  UploadFromDicomServerOptions
+    | CmdShowNewExperiments     ShowNewExperimentsOptions
     deriving (Eq, Show)
+
+data ShowNewExperimentsOptions = ShowNewExperimentsOptions deriving (Eq, Show)
 
 data UploadAllOptions = UploadAllOptions { uploadAllDryRun :: Bool } deriving (Eq, Show)
 
@@ -74,6 +77,9 @@ data UploaderOptions = UploaderOptions
     , optCommand        :: Command
     }
     deriving (Eq, Show)
+
+pShowNewExperimentsOption :: Parser Command
+pShowNewExperimentsOption = CmdShowNewExperiments <$> (pure ShowNewExperimentsOptions)
 
 pUploadAllOptions :: Parser Command
 pUploadAllOptions = CmdUploadAll <$> UploadAllOptions <$> switch (long "dry-run" <> help "Dry run.")
@@ -98,11 +104,12 @@ pUploaderOptions = UploaderOptions
   where
     -- x    = cmd1 <> cmd2 <> cmd3 <> cmd4
     -- FIXME For the moment just do DICOM server stuff.
-    x    = cmd4
+    x    = cmd4 <> cmd5
     cmd1 = command "upload-all"               (info (helper <*> pUploadAllOptions) (progDesc "Upload all experiments."))
     cmd2 = command "upload-one"               (info (helper <*> pUploadOneOptions) (progDesc "Upload a single experiment."))
     cmd3 = command "show-experiments"         (info (helper <*> pShowExprOptions)  (progDesc "Show local experiments."))
     cmd4 = command "upload-from-dicom-server" (info (helper <*> pUploadFromDicomServerOptions) (progDesc "Upload from DICOM server."))
+    cmd5 = command "show-new"                 (info (helper <*> pShowNewExperimentsOption)     (progDesc "Show new (unprocessed) patients on DICOM server."))
 
 getDicomDir :: UploaderOptions -> FilePath
 getDicomDir opts = fromMaybe "." (optDirectory opts)
@@ -380,6 +387,60 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
                              liftIO $ threadDelay $ sleepMinutes * (60 * 10^6)
         else do origDir <- liftIO getCurrentDirectory
                 uploadDicomAction opts origDir
+
+dostuff opts@(UploaderOptions _ _ _ _ (CmdShowNewExperiments _)) = showNewAction opts
+
+showNewAction opts = do
+    -- FIXME This is all quite similar to the start of uploadDicomAction...
+
+    -- Timezone:
+    ZonedTime _ tz <- liftIO getZonedTime
+
+    debug <- mytardisDebug <$> ask
+
+    cwd <- liftIO getCurrentDirectory
+
+    let slashToUnderscore = map (\c -> if c == '/' then '_' else c)
+
+    let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
+    liftIO $ createDirectoryIfMissing True fp
+
+    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
+
+    forM_ instrumentConfigs $ \( instrumentFilters
+                               , instrumentFiltersT
+                               , instrumentMetadataFields
+                               , experimentFields
+                               , datasetFields
+                               , schemaExperiment
+                               , schemaDataset
+                               , schemaDicomFile
+                               , defaultInstitutionName
+                               , defaultInstitutionalDepartmentName
+                               , defaultInstitutionalAddress
+                               , defaultOperators) -> do
+            _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+
+            case _ogroups of Left err -> undefined
+                             Right ogroups -> do
+                                                 let -- Times that available *series* have been updated:
+                                                     updatedTimes = map (\(_, _, s, _, _) -> (getSeriesLastUpdate tz s)) ogroups :: [Maybe ZonedTime]
+
+                                                     -- Hash of each:
+                                                     hashes = map (\(patient, study, series, _, _) -> getHashes (patient, study, series)) ogroups
+
+                                                     -- Together:
+                                                     hashAndLastUpdated = zip hashes updatedTimes
+
+                                                 -- liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
+
+                                                 recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
+
+                                                 let newPatients = S.toList $ S.fromList $ map (\(p, _, _, _, _) -> p) recentOgroups
+
+                                                 forM_ newPatients $ \p -> do
+                                                    let pname = M.lookup "PatientName" (opMainDicomTags p)
+                                                    liftIO $ putStrLn $ opID p ++ " " ++ show pname
 
 imageTroveMain :: IO ()
 imageTroveMain = do
