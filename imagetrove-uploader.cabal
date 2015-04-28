@@ -80,6 +80,7 @@ library
                      , old-locale
                      , acid-state
                      , safecopy
+                     , parallel-io
 
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -142,6 +143,7 @@ executable imagetrove-dicom-uploader
                      , old-locale
                      , acid-state
                      , safecopy
+                     , parallel-io
 
 executable imagetrove-bruker-uploader
   main-is:           MainBruker.hs
@@ -200,4 +202,5 @@ executable imagetrove-bruker-uploader
                      , old-locale
                      , acid-state
                      , safecopy
+                     , parallel-io
 
