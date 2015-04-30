@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
-module Network.ImageTrove.Acid (loadMap, updateLastUpdate, PatientStudySeries(..)) where
+module Network.ImageTrove.Acid (acidWorker, callWorkerIO, PatientStudySeries(..), AcidAction(..), AcidOutput(..)) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -11,6 +11,9 @@ import Data.Acid
 import Data.SafeCopy
 import Data.Time.LocalTime (ZonedTime(..))
 import Data.Typeable
+
+import Control.Concurrent
+import Control.Concurrent.STM
 
 import qualified Data.Map as Map
 
@@ -66,6 +69,29 @@ deleteLastUpdate fp hashes = do
     _ <- update acid (DeleteKey hashes)
     closeAcidState acid
 
+data AcidAction = AcidLoadMap FilePath
+                | AcidUpdateMap FilePath PatientStudySeries (Maybe ZonedTime)
+
+data AcidOutput = AcidMap (Map.Map Key Value)
+                | AcidNothing
+
+acidWorker m = forever $ do
+    (action, o) <- takeMVar m
+
+    case action of
+        AcidLoadMap fp -> do m <- loadMap fp
+                             putMVar o (AcidMap m)
+
+        AcidUpdateMap fp hashes lastUpdate -> do updateLastUpdate fp hashes lastUpdate
+                                                 putMVar o AcidNothing
+
+-- FIXME Copied from API.hs
+callWorkerIO :: MVar (t, MVar b) -> t -> IO b
+callWorkerIO m x = do
+    o <- newEmptyMVar
+    putMVar m (x, o)
+    o' <- takeMVar o
+    return o'
 
 -- Stuff to turn into a command line option
 _foo fp = do
@@ -77,3 +103,10 @@ _foo fp = do
     forM_ someone print
 
     -- Also add option to delete a patient.
+
+    -- *Network.ImageTrove.Acid> m <- loadMap "state_sample_config_files_CAI_7T.conf"
+    -- *Network.ImageTrove.Acid> let m' = Map.toList m
+    -- *Network.ImageTrove.Acid> let x = filter (\((p,_,_),_) -> p == "HASH OF PATIENT") m'
+    -- *Network.ImageTrove.Acid> x
+    -- *Network.ImageTrove.Acid> forM_ (map (\(z,_) -> z) x) (deleteLastUpdate "state_sample_config_files_CAI_7T.conf")
+

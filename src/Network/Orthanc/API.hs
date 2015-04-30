@@ -359,23 +359,25 @@ getSeriesArchive sid = do
 
     r <- liftIO $ getWith opts (host </> "series" </> sid </> "archive")
 
+    tmp <- mytardisTmp <$> ask
+
     case r ^? responseBody of
-        Just body -> liftIO $ catch (do tempDir <- createTempDirectory "/tmp" "dicomOrthancConversion"
+        Just body -> liftIO $ catch (do tempDir <- createTempDirectory tmp "dicomOrthancConversion"
                                         let zipfile = tempDir </> (sid ++ ".zip")
                                         BL.writeFile zipfile body
                                         return $ Right (tempDir, zipfile))
                                     (\e -> return $ Left $ show (e :: IOException))
         Nothing   -> return $ Left $ "Error: empty response body in getSeriesArchive for series " ++ sid
 
-unpackArchive :: FilePath -> FilePath -> IO (Either String FilePath)
-unpackArchive tempDir zipfile = catch
+unpackArchive :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+unpackArchive tmp tempDir zipfile = catch
     (do setCurrentDirectory tempDir
         unzipResult <- runShellCommand "unzip" ["-q", "-o", zipfile]
 
         case unzipResult of
             Left e  -> return $ Left e
             Right _ -> do dicomFiles <- filter (not . isSuffixOf ".zip") <$> getRecursiveContentsList tempDir
-                          linksDir <- createLinksDirectoryFromList dicomFiles
+                          linksDir <- createLinksDirectoryFromList tmp dicomFiles
                           return $ Right linksDir)
     (\e -> return $ Left $ show (e :: IOException))
 

@@ -51,6 +51,9 @@ import qualified Data.Map as Map
 
 import Control.Concurrent.ParallelIO.Local
 
+import Control.Concurrent
+import Control.Concurrent.STM
+
 data Command
     = CmdUploadAll              UploadAllOptions
     | CmdUploadOne              UploadOneOptions
@@ -143,12 +146,14 @@ getSeriesLastUpdate tz s = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y
 getHashes :: (OrthancPatient, OrthancStudy, OrthancSeries) -> PatientStudySeries
 getHashes (patient, study, series) = (opID patient, ostudyID study, oseriesID series)
 
-patientsToProcess :: FilePath
+patientsToProcess :: MVar (AcidAction, MVar AcidOutput)
+                  -> FilePath
                   -> [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
                   -> [(PatientStudySeries, Maybe ZonedTime)]
                   -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-patientsToProcess fp ogroups hashAndLastUpdated = do
-    m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
+patientsToProcess acidMVar fp ogroups hashAndLastUpdated = do
+    -- m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
+    AcidMap m <- callWorkerIO acidMVar (AcidLoadMap fp)
 
     let blah = zip ogroups hashAndLastUpdated
 
@@ -236,87 +241,111 @@ uploadDicomAction opts origDir = do
 
                                                  liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
 
-                                                 recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
+                                                 acidMVar <- liftIO $ newEmptyMVar
+                                                 workerAcid <- liftIO $ forkIO $ acidWorker acidMVar
+
+                                                 recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
 
                                                  liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
                                                  liftIO $ getZonedTime >>= print
 
                                                  conf <- ask
 
-                                                 let tasks = map (blaaah debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields) recentOgroups 
+                                                 experimentMVar <- liftIO $ newEmptyMVar
+                                                 datasetMVar    <- liftIO $ newEmptyMVar
+
+                                                 -- FIXME Would be nicer if we could avoid the runReaderT stuff here?
+                                                 _ <- liftIO $ forkIO $ runReaderT (workerCreateExperiment experimentMVar) conf
+                                                 _ <- liftIO $ forkIO $ runReaderT (workerCreateDataset    datasetMVar)    conf
+
+                                                 let tasks = map (blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields) recentOgroups 
                                                      tasks' = map (\t -> runReaderT t conf) tasks
+
+                                                 -- FIXME Add an ID to the config so that logging has a task ID.
 
                                                  liftIO $ withPool 4 $ \pool -> parallel_ pool tasks'
 
  
-blaaah debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
+blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
     liftIO $ getZonedTime >>= print
     liftIO $ putStrLn $ "getting series archive...."
-    Right (tempDir, zipfile) <- getSeriesArchive $ oseriesID series
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "got series archive."
+    archive <- getSeriesArchive $ oseriesID series
 
-    liftIO $ print (tempDir, zipfile)
+    case archive of
+        Left e -> liftIO $ putStrLn $ "Error: could not get series archive " ++ oseriesID series ++ "; failed with error: " ++ e
 
-    Right linksDir <- liftIO $ unpackArchive tempDir zipfile
-    liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
+        Right (tempDir, zipfile) -> do
+            liftIO $ getZonedTime >>= print
+            liftIO $ putStrLn $ "got series archive."
 
-    createProjectGroup linksDir
+            liftIO $ print (tempDir, zipfile)
 
-    rawDicomFiles <- liftIO $ getDicomFilesInDirectory ".dcm" linksDir
-    anonymizationResults <- liftIO $ forM rawDicomFiles anonymizeDicomFile
+            tmp <- mytardisTmp <$> ask
+            Right linksDir <- liftIO $ unpackArchive tmp tempDir zipfile
+            liftIO $ getZonedTime >>= print
+            liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
 
-    if length (lefts anonymizationResults) > 0
-       then liftIO $ putStrLn $ "Errors while anonymizing DICOM files: " ++ show (lefts anonymizationResults)
-       else do files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+            createProjectGroup linksDir
 
-               liftIO $ getZonedTime >>= print
-               liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
-               oneGroupResult <- uploadDicomAsMincOneGroup
-                   files
-                   instrumentFilters
-                   instrumentMetadataFields
-                   experimentFields
-                   datasetFields
-                   identifyExperiment
-                   identifyDataset
-                   identifyDatasetFile
-                   linksDir
-                   ( schemaExperiment
-                   , schemaDataset
-                   , schemaDicomFile
-                   , defaultInstitutionName
-                   , defaultInstitutionalDepartmentName
-                   , defaultInstitutionalAddress
-                   , defaultOperators)
+            rawDicomFiles <- liftIO $ getDicomFilesInDirectory ".dcm" linksDir
+            anonymizationResults <- liftIO $ forM rawDicomFiles anonymizeDicomFile
 
-               let schemaFile = schemaDicomFile -- FIXME
+            if length (lefts anonymizationResults) > 0
+               then liftIO $ putStrLn $ "Errors while anonymizing DICOM files: " ++ show (lefts anonymizationResults)
+               else do files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-               case oneGroupResult of
-                   (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
-                           zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+                       liftIO $ getZonedTime >>= print
+                       liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
+                       oneGroupResult <- uploadDicomAsMincOneGroup
+                           experimentMVar
+                           datasetMVar
+                           files
+                           instrumentFilters
+                           instrumentMetadataFields
+                           experimentFields
+                           datasetFields
+                           identifyExperiment
+                           identifyDataset
+                           identifyDatasetFile
+                           linksDir
+                           ( schemaExperiment
+                           , schemaDataset
+                           , schemaDicomFile
+                           , defaultInstitutionName
+                           , defaultInstitutionalDepartmentName
+                           , defaultInstitutionalAddress
+                           , defaultOperators)
 
-                           case zipfile' of
-                               A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
-                                                                    putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                    removeRecursiveSafely tempDir
-                                                                    putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                    removeRecursiveSafely linksDir
-                                                                    putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
-                                                                    updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
-                               A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                                    if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                                                     putStrLn $ "Not deleting links directory: " ++ linksDir
-                                                                             else do putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                                     removeRecursiveSafely tempDir
-                                                                                     putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                                     removeRecursiveSafely linksDir
+                       let schemaFile = schemaDicomFile -- FIXME
 
-                           liftIO $ print zipfile'
-                   (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
-                   (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
-                   (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
+                       case oneGroupResult of
+                           (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
+                                   zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+
+                                   case zipfile' of
+                                       A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
+                                                                            putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                            removeRecursiveSafely tempDir
+                                                                            putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                            removeRecursiveSafely linksDir
+                                                                            putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
+
+                                                                            -- updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
+                                                                            _ <- callWorkerIO acidMVar (AcidUpdateMap fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series))
+                                                                            putStrLn $ "Updated last update."
+
+                                       A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
+                                                                            if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                                                             putStrLn $ "Not deleting links directory: " ++ linksDir
+                                                                                     else do putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                             removeRecursiveSafely tempDir
+                                                                                             putStrLn $ "Deleting links directory: " ++ linksDir
+                                                                                             removeRecursiveSafely linksDir
+
+                                   liftIO $ print zipfile'
+                           (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
+                           (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
+                           (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
@@ -444,13 +473,69 @@ showNewAction opts = do
 
                                                  -- liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
 
-                                                 recentOgroups <- liftIO $ patientsToProcess fp ogroups hashAndLastUpdated
+                                                 acidMVar <- liftIO $ newEmptyMVar
+                                                 workerAcid <- liftIO $ forkIO $ acidWorker acidMVar
+
+                                                 recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
 
                                                  let newPatients = S.toList $ S.fromList $ map (\(p, _, _, _, _) -> p) recentOgroups
 
                                                  forM_ newPatients $ \p -> do
                                                     let pname = M.lookup "PatientName" (opMainDicomTags p)
                                                     liftIO $ putStrLn $ opID p ++ " " ++ show pname
+
+{-
+-- Single worker that talks to the database to create things.
+experimentWorker m = forever $ do
+    (x, o) <- takeMVar m
+    print $ "experimentWorker: got value: " ++ show x
+    threadDelay $ (1 * 10^6)
+
+    let x' = x + 1 :: Integer
+
+    print $ "experimentWorker: putting value " ++ show x' ++ " into output mvar."
+    putMVar o x'
+
+    return ()
+
+-- Minion that does its own work but has to ask the experimentWorker
+-- to do something for it.
+minion m mid x = do
+    putStrLn $ "I am minion " ++ mid ++ ". Asking experimentWorker to do something."
+
+    -- MVar for the value we want back.
+    result <- newEmptyMVar
+
+    -- Send our value x and our return value MVar to the global level MVar m.
+    putMVar m (x, result)
+
+    -- Wait for the result to come back.
+    result' <- takeMVar result
+
+    putStrLn $ "Minion " ++ mid ++ " finished, got result: " ++ show result'
+
+    return ()
+
+imageTroveMain :: IO ()
+imageTroveMain = do
+    -- Essentially a queue for the experimentWorker to read values from.
+    m <- newEmptyMVar
+
+    -- Fork it.
+    forkIO $ experimentWorker m
+
+    withPool 4 $ \pool -> parallel_ pool [ minion m "0" 0 
+                                         , minion m "1" 1
+                                         , minion m "2" 2
+                                         , minion m "3" 3
+                                         , minion m "4" 4
+                                         , minion m "5" 5
+                                         , minion m "6" 6
+                                         , minion m "7" 7
+                                         ]
+
+    print "done"
+-}
 
 imageTroveMain :: IO ()
 imageTroveMain = do
@@ -646,10 +731,13 @@ getConfig host orthHost f debug = do
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
+    tmp <- lookup cfg "tmp" :: IO (Maybe String)
+    let tmp' = if isNothing tmp then "/tmp" else fromJust tmp
+
     hSetBuffering stdin NoBuffering
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug tmp'
         _                        -> Nothing
 
 readInstrumentConfigs

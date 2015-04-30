@@ -60,12 +60,12 @@ globDcmFiles path = do
 
     return $ dcm ++ ima
 
-createLinksDirectory :: FilePath -> IO FilePath
-createLinksDirectory dicomDir = globDcmFiles dicomDir >>= createLinksDirectoryFromList
+createLinksDirectory :: FilePath -> FilePath -> IO FilePath
+createLinksDirectory tmp dicomDir = globDcmFiles dicomDir >>= createLinksDirectoryFromList tmp
 
-createLinksDirectoryFromList :: [FilePath] -> IO FilePath
-createLinksDirectoryFromList dicomFiles = do
-    tempDir <- createTempDirectory "/tmp" "dicomConversion"
+createLinksDirectoryFromList :: FilePath -> [FilePath] -> IO FilePath
+createLinksDirectoryFromList tmp dicomFiles = do
+    tempDir <- createTempDirectory tmp "dicomConversion"
 
     print dicomFiles
 
@@ -78,10 +78,10 @@ createLinksDirectoryFromList dicomFiles = do
 
     return tempDir
 
-dicomToMinc :: [FilePath] -> IO (Either String (FilePath, [FilePath]))
-dicomToMinc dicomFiles = do
-    dicomDir' <- createLinksDirectoryFromList dicomFiles
-    outputDir <- createTempDirectory "/tmp" "dcm2mnc"
+dicomToMinc :: FilePath -> [FilePath] -> IO (Either String (FilePath, [FilePath]))
+dicomToMinc tmp dicomFiles = do
+    dicomDir' <- createLinksDirectoryFromList tmp dicomFiles
+    outputDir <- createTempDirectory tmp "dcm2mnc"
 
     result <- runShellCommand "dcm2mnc" [dicomDir', outputDir]
 
@@ -90,9 +90,9 @@ dicomToMinc dicomFiles = do
     case result of Right result' -> (Right . (,) outputDir) <$> getRecursiveContentsList outputDir
                    Left e        -> return $ Left e
 
-mncToMnc2 :: FilePath -> IO (Either String FilePath)
-mncToMnc2 filePath = do
-    tmpFile <- fst <$> openTempFile "/tmp" "mincto2.mnc"
+mncToMnc2 :: FilePath -> FilePath -> IO (Either String FilePath)
+mncToMnc2 tmp filePath = do
+    tmpFile <- fst <$> openTempFile tmp "mincto2.mnc"
 
     result <- runShellCommand "mincconvert" ["-2", "-clobber", filePath, tmpFile]
 

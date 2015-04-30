@@ -103,10 +103,13 @@ getConfig host f debug = do
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
+    tmp <- lookup cfg "tmp" :: IO (Maybe String)
+    let tmp' = if isNothing tmp then "/imagetrove" else fromJust tmp
+
     hSetBuffering stdin NoBuffering
 
     return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug
+        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug tmp'
         _                        -> Nothing
 
 readInstrumentConfigs

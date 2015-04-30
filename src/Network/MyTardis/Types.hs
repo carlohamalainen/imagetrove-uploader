@@ -24,7 +24,10 @@ data IdentifiedDataset = IdentifiedDataset
     , iddExperiments        :: [String] -- ^ List of experiment resource URIs.
     , iddMetadataMaps       :: [(String, M.Map String String)] -- ^ Metadata attribute maps. The first component of the tuple is the schema name (a URL).
     }
-    deriving (Eq, Show)
+    deriving (Show)
+
+instance Eq IdentifiedDataset where
+    (IdentifiedDataset desc1 exprs1 _) == (IdentifiedDataset desc2 exprs2 _) = (desc1, exprs1) == (desc2, exprs2)
 
 -- | A file that has been identified on the local filesystem.
 data IdentifiedFile = IdentifiedFile

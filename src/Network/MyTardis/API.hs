@@ -53,6 +53,9 @@ import System.Unix.Directory (removeRecursiveSafely)
 
 import Data.Time.LocalTime (getZonedTime)
 
+import Control.Concurrent
+import Control.Concurrent.STM
+
 writeLog :: String -> ReaderT MyTardisConfig IO ()
 writeLog msg = do
     now <- liftIO $ show <$> getZonedTime
@@ -69,6 +72,7 @@ data MyTardisConfig = MyTardisConfig
     , orthancHost        :: String -- ^ URL to Orthanc web service, e.g. \"http://10.0.0.10:8042\"
     , mytardisDir        :: String -- ^ Path to MyTARDIS storage directory, e.g. \"/imagetrove\"
     , mytardisDebug      :: Bool   -- ^ If set to "True" then dicom conversion directories are not removed.
+    , mytardisTmp        :: FilePath -- ^ Directory for temporary files. Defaults to \"/tmp\".
     }
     deriving Show
 
@@ -79,8 +83,9 @@ defaultMyTardisOptions :: String -- ^ MyTARDIS host URL.
                        -> String -- ^ Orthanc host URL.
                        -> String -- ^ MyTARDIS storage directory.
                        -> Bool   -- ^ Debug mode.
+                       -> FilePath -- ^ Temporary directory.
                        -> MyTardisConfig
-defaultMyTardisOptions host user pass orthHost mytardisDir debug = MyTardisConfig host "/api/v1" user pass opts Nothing orthHost mytardisDir debug
+defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp = MyTardisConfig host "/api/v1" user pass opts Nothing orthHost mytardisDir debug tmp
   where
     opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
     optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
@@ -95,14 +100,14 @@ defaultMyTardisOptions host user pass orthHost mytardisDir debug = MyTardisConfi
 -- | Wrapper around Wreq's 'postWith' that uses our settings in a 'ReaderT'.
 postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 postWith' x v = do
-    MyTardisConfig host apiBase user pass opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ _ <- ask
     writeLog $ "postWith': " ++ show (x, v)
     liftIO $ postWith opts (host ++ apiBase ++ x) v
 
 -- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 putWith' x v = do
-    MyTardisConfig host apiBase user pass opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ _ <- ask
     writeLog $ "putWith': " ++ show (x, v)
     liftIO $ putWith opts (host ++ apiBase ++ x) v
 
@@ -192,7 +197,7 @@ getFileWithMetadata idf = getResourceWithMetadata (getDatasetFiles $ idfDatasetU
 getDatasetFiles :: URI -> ReaderT MyTardisConfig IO (Result [RestDatasetFile])
 getDatasetFiles uri = do
     writeLog $ "getDatasetFiles: uri: " ++ show uri
-    MyTardisConfig _ apiBase _ _ _ _ _ _ _ <- ask
+    MyTardisConfig _ apiBase _ _ _ _ _ _ _ _ <- ask
     getList $ dropIfPrefix apiBase $ uri ++ "files"
 
 -- | Create an experiment. If an experiment already exists in MyTARDIS that matches our
@@ -226,6 +231,33 @@ createExperiment ie@(IdentifiedExperiment description instutitionName title meta
             , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
             , ("objectacls",        toJSON $ ([] :: [RestGroup]))
             ]
+
+-- | Worker for creating experiments. Takes identified experiments on the first
+-- component of the MVar's tuple and sends results back on the second component of the tuple.
+workerCreateExperiment :: MVar (IdentifiedExperiment, MVar (Result RestExperiment)) -> ReaderT MyTardisConfig IO ()
+workerCreateExperiment m = forever $ do
+    (ie, o) <- liftIO $ takeMVar m
+
+    e <- createExperiment ie
+
+    liftIO $ putMVar o e
+
+callWorker :: MVar (t, MVar b) -> t -> ReaderT MyTardisConfig IO b
+callWorker m x = liftIO $ do
+    o <- newEmptyMVar
+    putMVar m (x, o)
+    o' <- takeMVar o
+    return o'
+
+-- | Worker for creating datasets. Takes identified datasets on the first
+-- component of the MVar's tuple and sends results back on the second component of the tuple.
+workerCreateDataset :: MVar (IdentifiedDataset, MVar (Result RestDataset)) -> ReaderT MyTardisConfig IO ()
+workerCreateDataset m = forever $ do
+    (ids, o) <- liftIO $ takeMVar m
+
+    d <- createDataset ids
+
+    liftIO $ putMVar o d
 
 -- | Create a new user in MyTARDIS' Django backend.
 createUser
@@ -398,7 +430,7 @@ getResource :: forall a. FromJSON a => URI -> ReaderT MyTardisConfig IO (Result 
 getResource uri = do
     writeLog $ "getResource: " ++ uri
 
-    MyTardisConfig host _ _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host _ _ _ opts _ _ _ _ _ <- ask
     r <- liftIO $ getWith opts (host ++ uri)
 
     case (join $ decode <$> r ^? responseBody :: Maybe Value) of
@@ -484,7 +516,7 @@ getList :: forall a. FromJSON a => String -> ReaderT MyTardisConfig IO (Result [
 getList url = do
     writeLog $ "getList: " ++ url
 
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     body <- liftIO $ (^? responseBody) <$> getWith opts (host ++ apiBase ++ url)
 
     let objects = join $ getObjects <$> body
@@ -576,7 +608,7 @@ copyFileToStore
 copyFileToStore filepath dsf = do
     writeLog $ "copyFileToStore: " ++ show (filepath, dsf)
 
-    MyTardisConfig _ _ _ _ _ _ _ mytardisDir _ <- ask
+    MyTardisConfig _ _ _ _ _ _ _ mytardisDir _ _ <- ask
 
     results <- forM (dsfReplicas dsf) $ \r -> do
         let filePrefix = "file://" :: String
@@ -607,28 +639,28 @@ copyFileToStore filepath dsf = do
 deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response ())
 deleteExperiment x = do
     writeLog $ "deleteExperiment: deleting experiment with ID " ++ show (eiID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ eiResourceURI x
 
 -- | Delete a dataset.
 deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response ())
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
 deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response ())
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsfResourceURI x
 
 -- | Delete a parameter.
 deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response ())
 deleteParameter x = do
     writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ epResourceURI x
 
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment
@@ -925,10 +957,10 @@ uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields da
     let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
     liftIO $ putStrLn $ "uploadDicomAsMinc: |groups| = " ++ (show $ length groups)
 
-    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
+    forM_ groups $ \files -> do result <- uploadDicomAsMincOneGroup undefined undefined files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
                                 liftIO $ putStrLn $ " uploadDicomAsMinc: result from uploadDicomAsMincOneGroup: " ++ show result
 
-uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
+uploadDicomAsMincOneGroup experimentMVar datasetMVar files instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile dir (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = do
     writeLog $ "uploadDicomAsMincOneGroup: " ++ show (files, dir, (schemaExperiment, schemaDataset, schemaFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators))
 
     writeLog $ "Getting schemas."
@@ -946,13 +978,15 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
                 files
 
     writeLog $ "Creating experiment."
-    e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
+    -- e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
+    e <- maybeToResult <$> traverse (callWorker experimentMVar) ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
 
     writeLog $ "Identifying dataset."
     let ids = resultMaybeToResult ((\e -> identifyDataset schemaDataset datasetFields e files) <$> e) :: Result IdentifiedDataset
 
     writeLog $ "Creating dataset."
-    d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
+    -- d <- squashResults <$> traverse createDataset ids :: ReaderT MyTardisConfig IO (Result RestDataset)
+    d <- squashResults <$> traverse (callWorker datasetMVar) ids :: ReaderT MyTardisConfig IO (Result RestDataset)
 
     let oneFile = headMay files
         Just pid        = join (dicomPatientID         <$> oneFile) -- FIXME dangerous pattern match, should be an error
@@ -970,7 +1004,8 @@ uploadDicomAsMincOneGroup files instrumentFilters instrumentMetadataFields exper
 
     -- Pack the dicom files as Minc
     writeLog $ "Converting DICOM to Minc."
-    dicom <- liftIO $ dicomToMinc $ map dicomFilePath files
+    tmp <- mytardisTmp <$> ask
+    dicom <- liftIO $ dicomToMinc tmp $ map dicomFilePath files
 
     case (e, d, filemetadata) of
         (Success e', Success d', Just filemetadata') -> renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr dicom
@@ -988,6 +1023,13 @@ renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' file
     let mincFiles = map replacePatientName _mincFiles
 
     finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' (tempDir, mincFiles)
+
+    debug <- mytardisDebug <$> ask
+
+    if debug
+        then writeLog $ "Not removing temporary directory: " ++ tempDir
+        else do writeLog $ "Removing temporary directory: " ++ tempDir
+                liftIO $ removeRecursiveSafely tempDir
 
     -- FIXME This should depend on the earlier results!
     return $ Success (e, d)
@@ -1009,10 +1051,12 @@ renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' file
              oldFileName = last bits
              newFileName = (addPrefix . dropPatientName) oldFileName
 
-             tidyName = map (toLower . dashToUnderscore)
+             tidyName = map (toLower . fixWeirdChars)
 
-             dashToUnderscore '-' = '_'
-             dashToUnderscore c   = c
+             fixWeirdChars '-' = '_'
+             fixWeirdChars '.' = '_'
+             fixWeirdChars ':' = '_'
+             fixWeirdChars c   = c
 
 data FinalResult = BothOK
                  | MincFileError  String
@@ -1033,7 +1077,9 @@ finaliseMincFiles
     -> (FilePath, [FilePath])           -- ^ Temporary directory containing MINC files; list of MINC files in that directory.
     -> ReaderT MyTardisConfig IO [(FinalResult, Result RestDatasetFile, Either String (Result RestDatasetFile), Either String (Result RestDatasetFile))]
 finaliseMincFiles schemaFile identifyDatasetFile d filemetadata (tempDir, mincFiles) = do
-    toMinc2Results <- liftIO $ forM mincFiles mncToMnc2 -- FIXME check results
+
+    tmp <- mytardisTmp <$> ask
+    toMinc2Results <- liftIO $ forM mincFiles (mncToMnc2 tmp) -- FIXME check results
 
     stuff <- forM mincFiles $ \f -> do
         writeLog $ "uploadDicomAsMinc: minc file f: " ++ show f
