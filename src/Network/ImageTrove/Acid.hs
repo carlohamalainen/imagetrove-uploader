@@ -17,6 +17,9 @@ import Control.Concurrent.STM
 
 import qualified Data.Map as Map
 
+import Control.Exception (onException)
+import Control.Concurrent (threadDelay)
+
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
 type PatientStudySeries = (String, String, String)
@@ -52,22 +55,31 @@ $(makeAcidic ''KeyValue ['insertKey, 'deleteKey, 'lookupKey, 'getMapInternal])
 
 loadMap :: FilePath -> IO (Map.Map Key Value)
 loadMap fp = do
-    acid <- openLocalStateFrom fp (KeyValue Map.empty)
-    m <- query acid GetMapInternal
-    closeAcidState acid
-    return m
+    loadMap' fp `onException` (print "error: exception in loadMap!" >> threadDelay (1 * 10^6) >> loadMap fp)
+  where
+    loadMap' fp = do
+        acid <- openLocalStateFrom fp (KeyValue Map.empty)
+        m <- query acid GetMapInternal
+        closeAcidState acid
+        return m
 
 updateLastUpdate :: FilePath -> PatientStudySeries -> Maybe ZonedTime -> IO ()
 updateLastUpdate fp hashes lastUpdate = do
-    acid <- openLocalStateFrom fp (KeyValue Map.empty)
-    _ <- update acid (InsertKey hashes lastUpdate)
-    closeAcidState acid
+    updateLastUpdate' fp hashes lastUpdate `onException` (print "error: exception in updateLastUpdate!" >> threadDelay (1 * 10^6) >> updateLastUpdate fp hashes lastUpdate)
+  where
+    updateLastUpdate' fp hashes lastUpdate = do
+        acid <- openLocalStateFrom fp (KeyValue Map.empty)
+        _ <- update acid (InsertKey hashes lastUpdate)
+        closeAcidState acid
 
 deleteLastUpdate :: FilePath -> PatientStudySeries -> IO ()
 deleteLastUpdate fp hashes = do
-    acid <- openLocalStateFrom fp (KeyValue Map.empty)
-    _ <- update acid (DeleteKey hashes)
-    closeAcidState acid
+    deleteLastUpdate' fp hashes `onException` (print "error: exception in deleteLastUpdate!" >> threadDelay (1 * 10^6) >> deleteLastUpdate fp hashes)
+  where
+    deleteLastUpdate' fp hashes = do
+        acid <- openLocalStateFrom fp (KeyValue Map.empty)
+        _ <- update acid (DeleteKey hashes)
+        closeAcidState acid
 
 data AcidAction = AcidLoadMap FilePath
                 | AcidUpdateMap FilePath PatientStudySeries (Maybe ZonedTime)
