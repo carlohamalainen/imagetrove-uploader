@@ -19,23 +19,33 @@ import System.IO
 import System.Process
 import System.Process.Streaming
 
-runShellCommand :: FilePath -> [String] -> IO (Either String String)
-runShellCommand cmd args = do
-    x <- simpleSafeExecute (pipeoe $ separated (surely B.toLazyM) (surely B.toLazyM)) (proc cmd args)
+import System.Exit
+import System.Directory (getCurrentDirectory)
 
-    return $ case x of Left e            -> Left e
-                       Right (stdOut, _) -> Right $ map w2c $ BS.unpack $ BSL.toStrict stdOut
+runShellCommand :: FilePath -> FilePath -> [String] -> IO (Either String String)
+runShellCommand cwd cmd args = do
+    putStrLn $ "runShellCommand: " ++ show (cwd, cmd, args)
+
+    (exitCode, (stdOut, stdErr)) <- execute (pipeoe (fromFold B.toLazyM) (fromFold B.toLazyM)) ((proc cmd args) { cwd = Just cwd })
+
+    return $ case exitCode of
+        ExitSuccess   -> Right $ map w2c $ BS.unpack $ BSL.toStrict stdOut
+        ExitFailure e -> Left $ "runShellCommand: exit status " ++ show e ++ " with stdErr: " ++ (map w2c $ BS.unpack $ BSL.toStrict $ stdErr)
 
 -- | Run the shell command and return some output, ignoring the
 -- return code. This is useful for badly behaved utilities.
-runShellCommand' :: FilePath -> [String] -> IO String
-runShellCommand' cmd args = do
-    x <- simpleSafeExecute (pipeoe $ separated (surely B.toLazyM) (surely B.toLazyM)) (proc cmd args)
-    return $ case x of Left e            -> e
-                       Right (stdOut, _) -> map w2c $ BS.unpack $ BSL.toStrict stdOut
+runShellCommand' :: FilePath -> FilePath -> [String] -> IO String
+runShellCommand' cwd cmd args = do
+    (exitCode, (stdOut, stdErr)) <- execute (pipeoe (fromFold B.toLazyM) (fromFold B.toLazyM)) ((proc cmd args) { cwd = Just cwd })
+
+    return $ case exitCode of
+        ExitSuccess   -> map w2c $ BS.unpack $ BSL.toStrict stdOut
+        ExitFailure e -> "runShellCommand: exit status " ++ show e ++ " with stdErr: " ++ (map w2c $ BS.unpack $ BSL.toStrict $ stdErr)
 
 computeChecksum :: FilePath -> IO (Either String String)
-computeChecksum fileName = liftM (head . words) <$> runShellCommand "md5sum" [fileName]
+computeChecksum fileName = do
+    cwd <- getCurrentDirectory
+    liftM (head . words) <$> runShellCommand cwd "md5sum" [fileName]
 
 sha256 :: String -> String
 sha256 s = (toHex . hashlazy . BSL.pack) (map c2w s)

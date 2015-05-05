@@ -89,9 +89,9 @@ defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp = MyTardisC
   where
     opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
     optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
-                         & auth .~ basicAuth (B8.pack user) (B8.pack pass)
+                         & auth .~ (Just $ basicAuth (B8.pack user) (B8.pack pass))
     optsHTTPS = defaults & manager .~ Left (tlsManager { managerResponseTimeout = Just 3000000000 } )
-                         & auth .~ basicAuth (B8.pack user) (B8.pack pass)
+                         & auth .~ (Just $ basicAuth (B8.pack user) (B8.pack pass))
 
     -- FIXME The first 'True' to TLSSettingsSimple disables certificate checking. Just for testing at the moment!
     -- See 'settingDisableCertificateValidation' in http://hackage.haskell.org/package/connection-0.2.3/docs/Network-Connection.html
@@ -254,9 +254,13 @@ callWorker m x = liftIO $ do
 workerCreateDataset :: MVar (IdentifiedDataset, MVar (Result RestDataset)) -> ReaderT MyTardisConfig IO ()
 workerCreateDataset m = forever $ do
     (ids, o) <- liftIO $ takeMVar m
-
     d <- createDataset ids
+    liftIO $ putMVar o d
 
+-- | Worker for creating groups.
+workerCreateGroup m = forever $ do
+    (name, o) <- liftIO $ takeMVar m
+    d <- getOrCreateGroup name
     liftIO $ putMVar o d
 
 -- | Create a new user in MyTARDIS' Django backend.
@@ -531,6 +535,10 @@ getList url = do
                                   return $ liftM2 (++) this rest
                  Nothing    -> return this
 
+eitherToResult :: Either String (Result t) -> Result t
+eitherToResult (Left e)  = Error e
+eitherToResult (Right x) = x
+
 -- This is almost asum from Data.Foldable?
 maybeToResult :: Maybe (Result t) -> Result t
 maybeToResult (Just x) = x
@@ -636,28 +644,28 @@ copyFileToStore filepath dsf = do
     return results
 
 -- | Delete an experiment.
-deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response ())
+deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 deleteExperiment x = do
     writeLog $ "deleteExperiment: deleting experiment with ID " ++ show (eiID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ eiResourceURI x
 
 -- | Delete a dataset.
-deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response ())
+deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
-deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response ())
+deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
     liftIO $ deleteWith opts $ host ++ dsfResourceURI x
 
 -- | Delete a parameter.
-deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response ())
+deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 deleteParameter x = do
     writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
@@ -932,7 +940,7 @@ uploadDicomAsMinc
          -> [DicomFile -> Maybe String]
          -> [DicomFile -> Maybe String]
          -> [DicomFile]
-         -> Maybe IdentifiedExperiment)     -- ^ Identify an experiment.
+         -> Either String IdentifiedExperiment)     -- ^ Identify an experiment.
      -> (String
          -> [DicomFile -> Maybe String]
          -> RestExperiment
@@ -978,8 +986,7 @@ uploadDicomAsMincOneGroup experimentMVar datasetMVar files instrumentFilters ins
                 files
 
     writeLog $ "Creating experiment."
-    -- e <- maybeToResult <$> traverse createExperiment ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
-    e <- maybeToResult <$> traverse (callWorker experimentMVar) ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
+    e <- eitherToResult <$> traverse (callWorker experimentMVar) ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
 
     writeLog $ "Identifying dataset."
     let ids = resultMaybeToResult ((\e -> identifyDataset schemaDataset datasetFields e files) <$> e) :: Result IdentifiedDataset
@@ -1013,7 +1020,13 @@ uploadDicomAsMincOneGroup experimentMVar datasetMVar files instrumentFilters ins
         (Success _, Error dsError, _)                -> do return $ Error $ "Error when creating dataset: " ++ dsError
         (Success _, Success _, Nothing)              -> do return $ Error $ "Error when creating extracting file metadata. No files in DICOM group!"
 
-renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr (Left err) = return $ Error err
+-- FIXME This has become a mess. If the 'dicom' parameter is a Left, it means that the earlier dicomToMinc failed. Which is entirely
+-- reasonable because not all DICOM data can be converted to Minc. So let's return a Success here (ugh) even though something
+-- went wrong earlier.
+-- renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr (Left err) = return $ Error err
+renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr (Left err) = return $ Success (e, d)
+
+
 renameMincThenFinal e d finaliseMincFiles schemaFile identifyDatasetFile d' filemetadata' pid studyDesc seriesDesc seriesNr dicom@(Right (tempDir, _mincFiles)) = do
     -- Rename the minc files to have study and series prefixes.
     -- FIXME Surprising that 'rename' has type Filepath -> FilePath -> IO ()

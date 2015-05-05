@@ -50,7 +50,7 @@ getRecursiveContentsList :: FilePath -> IO [FilePath]
 getRecursiveContentsList path = find always (fileType ==? RegularFile) path
 
 dcmDump :: FilePath -> IO (Either String String)
-dcmDump f = runShellCommand "dcmdump" ["+Qn", "+L", "-M", f]
+dcmDump f = runShellCommand (dropFileName f) "dcmdump" ["+Qn", "+L", "-M", f]
 
 globDcmFiles :: FilePath -> IO [FilePath]
 globDcmFiles path = do
@@ -83,7 +83,12 @@ dicomToMinc tmp dicomFiles = do
     dicomDir' <- createLinksDirectoryFromList tmp dicomFiles
     outputDir <- createTempDirectory tmp "dcm2mnc"
 
-    result <- runShellCommand "dcm2mnc" [dicomDir', outputDir]
+    putStrLn $ "dicomToMinc: " ++ show ("dcm2mnc", [dicomDir', outputDir])
+
+    result <- runShellCommand tmp "dcm2mnc" [dicomDir', outputDir] -- FIXME OK to run from tmp?
+
+    putStrLn $ "dicomToMinc: result: " ++ show result
+
 
     removeRecursiveSafely dicomDir'
 
@@ -94,7 +99,7 @@ mncToMnc2 :: FilePath -> FilePath -> IO (Either String FilePath)
 mncToMnc2 tmp filePath = do
     tmpFile <- fst <$> openTempFile tmp "mincto2.mnc"
 
-    result <- runShellCommand "mincconvert" ["-2", "-clobber", filePath, tmpFile]
+    result <- runShellCommand (dropFileName filePath) "mincconvert" ["-2", "-clobber", filePath, tmpFile]
 
     case result of Right _ -> do renameFile tmpFile filePath
                                  return $ Right filePath
@@ -104,7 +109,7 @@ createMincThumbnail :: FilePath -> IO (Either String FilePath)
 createMincThumbnail mncFile = do
     let mincThumbnail = mncFile ++ ".png"
 
-    result <- runShellCommand "mincpik" [mncFile, mincThumbnail]
+    result <- runShellCommand (dropFileName mncFile) "mincpik" [mncFile, mincThumbnail]
 
     case result of Right _ -> return $ Right mincThumbnail
                    Left e  -> return $ Left e
@@ -114,7 +119,7 @@ createNifti mncFile = do
     let base = reverse . (drop 3) . reverse $ mncFile
         niftiFile = base ++ "nii"
 
-    result <- runShellCommand "mnc2nii" [mncFile, niftiFile]
+    result <- runShellCommand (dropFileName mncFile) "mnc2nii" [mncFile, niftiFile]
 
     case result of Right _ -> return $ Right niftiFile
                    Left e  -> return $ Left e

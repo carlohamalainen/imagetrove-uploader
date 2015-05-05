@@ -4,9 +4,12 @@ module Network.ImageTrove.MainDicom where
 
 import Prelude hiding (lookup)
 
+import Control.Exception
+
 import Control.Monad.Reader
 import Control.Monad (forever, when)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, poll, mapConcurrently)
 import Data.Configurator
 import Data.Configurator.Types
 import Data.Monoid (mempty)
@@ -53,6 +56,15 @@ import Control.Concurrent.ParallelIO.Local
 
 import Control.Concurrent
 import Control.Concurrent.STM
+
+import Network.Wreq hiding (header)
+import Control.Exception.Base (catch, IOException)
+import Control.Lens hiding ((.=))
+import System.IO.Temp
+import qualified Data.ByteString.Lazy   as BL
+
+import System.FilePath
+
 
 data Command
     = CmdUploadAll              UploadAllOptions
@@ -122,10 +134,10 @@ getDicomDir opts = fromMaybe "." (optDirectory opts)
 hashFiles :: [FilePath] -> String
 hashFiles = sha256 . unwords
 
-createProjectGroup linksDir = do
+createProjectGroup groupMVar linksDir = do
     projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
 
-    case projectID of A.Success projectID' -> do projectResult <- getOrCreateGroup $ "Project " ++ projectID'
+    case projectID of A.Success projectID' -> do projectResult <- callWorker groupMVar $ "Project " ++ projectID'
                                                  case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created project group: " ++ projectID'
                                                                        A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating project group: " ++ projErr
                       A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve Project ID from ReferringPhysician field: " ++ err
@@ -133,7 +145,7 @@ createProjectGroup linksDir = do
 uploadAllAction opts = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \(instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
+    forM_ instrumentConfigs $ \(instrumentName, instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
 -- | Orthanc returns the date/time but has no timezone so append tz here:
 -- getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
@@ -197,9 +209,11 @@ anonymizeDicomFile f = do
 
                                       putStrLn $ "anonymizeDicomFile: " ++ show (cmd, opts)
 
-                                      runShellCommand cmd opts
+                                      runShellCommand (dropFileName f) cmd opts
 
 uploadDicomAction opts origDir = do
+    liftIO $ print "uploadDicomAction: entering."
+
     -- Timezone:
     ZonedTime _ tz <- liftIO getZonedTime
 
@@ -214,7 +228,8 @@ uploadDicomAction opts origDir = do
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \( instrumentFilters
+    forM_ instrumentConfigs $ \( instrumentName
+                               , instrumentFilters
                                , instrumentFiltersT
                                , instrumentMetadataFields
                                , experimentFields
@@ -226,6 +241,12 @@ uploadDicomAction opts origDir = do
                                , defaultInstitutionalDepartmentName
                                , defaultInstitutionalAddress
                                , defaultOperators) -> do
+
+            liftIO $ putStrLn ""
+            liftIO $ putStrLn ""
+            liftIO $ putStrLn $ "Instrument: " ++ instrumentName
+            liftIO $ putStrLn ""
+
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             case _ogroups of Left err -> undefined
@@ -242,7 +263,7 @@ uploadDicomAction opts origDir = do
                                                  liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
 
                                                  acidMVar <- liftIO $ newEmptyMVar
-                                                 workerAcid <- liftIO $ forkIO $ acidWorker acidMVar
+                                                 asyncAcidWorker <- liftIO $ async $ acidWorker acidMVar
 
                                                  recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
 
@@ -253,23 +274,67 @@ uploadDicomAction opts origDir = do
 
                                                  experimentMVar <- liftIO $ newEmptyMVar
                                                  datasetMVar    <- liftIO $ newEmptyMVar
+                                                 groupMVar      <- liftIO $ newEmptyMVar
 
                                                  -- FIXME Would be nicer if we could avoid the runReaderT stuff here?
-                                                 _ <- liftIO $ forkIO $ runReaderT (workerCreateExperiment experimentMVar) conf
-                                                 _ <- liftIO $ forkIO $ runReaderT (workerCreateDataset    datasetMVar)    conf
+                                                 asyncWorkerCreateExperiment <- liftIO $ async $ runReaderT (workerCreateExperiment experimentMVar) conf
+                                                 asyncWorkerCreateDataset    <- liftIO $ async $ runReaderT (workerCreateDataset    datasetMVar)    conf
+                                                 asyncWorkerCreateGroup      <- liftIO $ async $ runReaderT (workerCreateGroup      groupMVar)      conf
 
-                                                 let tasks = map (blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields) recentOgroups 
-                                                     tasks' = map (\t -> runReaderT t conf) tasks
+                                                 -- let tasks = map (blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields) recentOgroups 
+                                                 --    tasks' = map (\t -> runReaderT t conf) tasks
 
                                                  -- FIXME Add an ID to the config so that logging has a task ID.
 
-                                                 liftIO $ withPool 4 $ \pool -> parallel_ pool tasks'
+                                                 -- liftIO $ withPool 4 $ \pool -> parallel_ pool tasks'
+                                                 -- liftIO $ forM_ tasks' (liftM id)
 
+                                                 -- liftIO $ forM_ (take 10 tasks') forkIO -- FIXME Not terribly efficient due to repeated re-scans...
+
+                                                 let fn = \og -> runReaderT (blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields og) conf
+
+                                                 -- liftIO $ myPool fn recentOgroups
+                                                 -- liftIO $ fn $ head recentOgroups
+
+                                                 let tasks = map fn recentOgroups
+
+                                                 -- FIXME Add an ID to the config so that logging has a task ID.
+
+                                                 liftIO $ withPool 10 $ \pool -> parallel_ pool tasks
+
+                                                 pollExperiment <- liftIO $ poll asyncWorkerCreateExperiment
+                                                 pollDataset    <- liftIO $ poll asyncWorkerCreateDataset
+                                                 pollGroup      <- liftIO $ poll asyncWorkerCreateGroup
+                                                 pollAcid       <- liftIO $ poll asyncAcidWorker
+
+                                                 liftIO $ putStrLn $ "poll pollExperiment: " ++ show pollExperiment
+                                                 liftIO $ putStrLn $ "poll pollDataset: " ++ show pollDataset
+                                                 liftIO $ putStrLn $ "poll pollGroup: " ++ show (pollGroup :: Maybe (Either SomeException ()))
+                                                 liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
+
+                                                 --    tasks' = map (\t -> runReaderT t conf) tasks
+
+                                                 liftIO $ print "uploadDicomAction: finishing inner loop on instrument."
+
+    liftIO $ print "uploadDicomAction: exiting."
  
-blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
+blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
+    here <- liftIO getZonedTime
+    liftIO $ print ("blaaah", "entering at time", here, opID patient, ostudyID study, oseriesID series)
+
+    -- Before we get the archive, check if the Referring Physician is there so that we can get a project ID.
+    let projectID = join $ tagValue <$> otagReferringPhysicianName tags
+    case is5digits <$> projectID of
+        Nothing    -> liftIO $ putStrLn $ "Error: could not read Referring Physician Name from " ++ opID patient ++ " " ++ ostudyID study ++ " " ++ oseriesID series
+        Just False -> liftIO $ putStrLn $ "Error: invalid project ID: \"" ++ (fromJust projectID) ++ "\" from " ++ opID patient ++ " " ++ ostudyID study ++ " " ++ oseriesID series
+        Just True  -> blaaah' acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags)
+        
+blaaah' acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
+        
     liftIO $ getZonedTime >>= print
-    liftIO $ putStrLn $ "getting series archive...."
+    liftIO $ putStrLn $ "getting series archive.... " ++ oseriesID series
     archive <- getSeriesArchive $ oseriesID series
+    liftIO $ putStrLn $ "finished getting series archive.... " ++ oseriesID series
 
     case archive of
         Left e -> liftIO $ putStrLn $ "Error: could not get series archive " ++ oseriesID series ++ "; failed with error: " ++ e
@@ -281,71 +346,75 @@ blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDa
             liftIO $ print (tempDir, zipfile)
 
             tmp <- mytardisTmp <$> ask
-            Right linksDir <- liftIO $ unpackArchive tmp tempDir zipfile
-            liftIO $ getZonedTime >>= print
-            liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir
+            linksDir <- liftIO $ unpackArchive tmp tempDir zipfile
+            case linksDir of
+                Left linksErr -> liftIO $ putStrLn $ "blaaah: error unpacking archive: " ++ linksErr
+                Right linksDir' -> do
+                                      liftIO $ getZonedTime >>= print
+                                      liftIO $ putStrLn $ "dostuff: linksDir: " ++ linksDir'
 
-            createProjectGroup linksDir
+                                      createProjectGroup groupMVar linksDir'
 
-            rawDicomFiles <- liftIO $ getDicomFilesInDirectory ".dcm" linksDir
-            anonymizationResults <- liftIO $ forM rawDicomFiles anonymizeDicomFile
+                                      rawDicomFiles <- liftIO $ getDicomFilesInDirectory ".dcm" linksDir'
+                                      anonymizationResults <- liftIO $ forM rawDicomFiles anonymizeDicomFile
 
-            if length (lefts anonymizationResults) > 0
-               then liftIO $ putStrLn $ "Errors while anonymizing DICOM files: " ++ show (lefts anonymizationResults)
-               else do files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+                                      if length (lefts anonymizationResults) > 0
+                                         then liftIO $ putStrLn $ "Errors while anonymizing DICOM files: " ++ show (lefts anonymizationResults)
+                                         else do files <- liftIO $ rights <$> (getDicomFilesInDirectory ".dcm" linksDir' >>= mapM readDicomMetadata)
 
-                       liftIO $ getZonedTime >>= print
-                       liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
-                       oneGroupResult <- uploadDicomAsMincOneGroup
-                           experimentMVar
-                           datasetMVar
-                           files
-                           instrumentFilters
-                           instrumentMetadataFields
-                           experimentFields
-                           datasetFields
-                           identifyExperiment
-                           identifyDataset
-                           identifyDatasetFile
-                           linksDir
-                           ( schemaExperiment
-                           , schemaDataset
-                           , schemaDicomFile
-                           , defaultInstitutionName
-                           , defaultInstitutionalDepartmentName
-                           , defaultInstitutionalAddress
-                           , defaultOperators)
+                                                 liftIO $ getZonedTime >>= print
+                                                 liftIO $ putStrLn $ "calling uploadDicomAsMincOneGroup..."
+                                                 oneGroupResult <- uploadDicomAsMincOneGroup
+                                                     experimentMVar
+                                                     datasetMVar
+                                                     files
+                                                     instrumentFilters
+                                                     instrumentMetadataFields
+                                                     experimentFields
+                                                     datasetFields
+                                                     identifyExperiment
+                                                     identifyDataset
+                                                     identifyDatasetFile
+                                                     linksDir'
+                                                     ( schemaExperiment
+                                                     , schemaDataset
+                                                     , schemaDicomFile
+                                                     , defaultInstitutionName
+                                                     , defaultInstitutionalDepartmentName
+                                                     , defaultInstitutionalAddress
+                                                     , defaultOperators)
 
-                       let schemaFile = schemaDicomFile -- FIXME
+                                                 let schemaFile = schemaDicomFile -- FIXME
 
-                       case oneGroupResult of
-                           (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
-                                   zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
+                                                 case oneGroupResult of
+                                                     (A.Success (A.Success restExperiment, A.Success restDataset)) -> do
+                                                             zipfile' <- uploadFileBasic schemaFile identifyDatasetFile restDataset zipfile [] -- FIXME add some metadata
 
-                                   case zipfile' of
-                                       A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
-                                                                            putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                            removeRecursiveSafely tempDir
-                                                                            putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                            removeRecursiveSafely linksDir
-                                                                            putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
+                                                             case zipfile' of
+                                                                 A.Success zipfile''   -> liftIO $ do putStrLn $ "Successfully uploaded: " ++ show zipfile''
+                                                                                                      putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                                      removeRecursiveSafely tempDir
+                                                                                                      putStrLn $ "Deleting links directory: " ++ linksDir'
+                                                                                                      removeRecursiveSafely linksDir'
+                                                                                                      putStrLn $ "Updating last updated: " ++ show (fp, opID patient, getSeriesLastUpdate tz series)
 
-                                                                            -- updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
-                                                                            _ <- callWorkerIO acidMVar (AcidUpdateMap fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series))
-                                                                            putStrLn $ "Updated last update."
+                                                                                                      -- updateLastUpdate fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series)
+                                                                                                      _ <- callWorkerIO acidMVar (AcidUpdateMap fp (getHashes (patient, study, series)) (getSeriesLastUpdate tz series))
+                                                                                                      putStrLn $ "Updated last update."
 
-                                       A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
-                                                                            if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
-                                                                                             putStrLn $ "Not deleting links directory: " ++ linksDir
-                                                                                     else do putStrLn $ "Deleting temporary directory: " ++ tempDir
-                                                                                             removeRecursiveSafely tempDir
-                                                                                             putStrLn $ "Deleting links directory: " ++ linksDir
-                                                                                             removeRecursiveSafely linksDir
+                                                                 A.Error e             -> liftIO $ do putStrLn $ "Error while uploading series archive: " ++ e
+                                                                                                      if debug then do putStrLn $ "Not deleting temporary directory: " ++ tempDir
+                                                                                                                       putStrLn $ "Not deleting links directory: " ++ linksDir'
+                                                                                                               else do putStrLn $ "Deleting temporary directory: " ++ tempDir
+                                                                                                                       removeRecursiveSafely tempDir
+                                                                                                                       putStrLn $ "Deleting links directory: " ++ linksDir'
+                                                                                                                       removeRecursiveSafely linksDir'
 
-                                   liftIO $ print zipfile'
-                           (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
-                           (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
-                           (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
+                                                             liftIO $ print zipfile'
+                                                     (A.Success (A.Error expError, _              )) -> liftIO $ putStrLn $ "Error when creating experiment: "     ++ expError
+                                                     (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
+                                                     (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
+    liftIO $ print "blaaah: exiting"
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
@@ -359,7 +428,8 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \( instrumentFilters
+    forM_ instrumentConfigs $ \( instrumentName
+                               , instrumentFilters
                                , instrumentFiltersT
                                , instrumentMetadataFields
                                , experimentFields
@@ -373,7 +443,7 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdShowExperiments cmdShow)) = do
                                , defaultOperators)            -> do let groups = groupDicomFiles instrumentFilters experimentFields datasetFields _files
                                                                     forM_ groups $ \files -> do
                                                                         let
-                                                                            Just (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files
+                                                                            Right (IdentifiedExperiment desc institution title metadata) = identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators experimentFields instrumentMetadataFields files -- FIXME dangerous pattern match
                                                                             hash = (sha256 . unwords) (map dicomFilePath files)
 
                                                                         liftIO $ if showFileSets cmdShow
@@ -392,7 +462,8 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadOne oneOpts)) = do
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    let groups = concat $ flip map instrumentConfigs $ \( instrumentFilters
+    let groups = concat $ flip map instrumentConfigs $ \( instrumentName
+                               , instrumentFilters
                                , instrumentFiltersT
                                , instrumentMetadataFields
                                , experimentFields
@@ -427,6 +498,8 @@ dostuff opts@(UploaderOptions _ _ _ _ (CmdUploadFromDicomServer dicomOpts)) = do
         else do origDir <- liftIO getCurrentDirectory
                 uploadDicomAction opts origDir
 
+    liftIO $ print "Exiting dostuff at top level."
+
 dostuff opts@(UploaderOptions _ _ _ _ (CmdShowNewExperiments _)) = showNewAction opts
 
 showNewAction opts = do
@@ -446,7 +519,8 @@ showNewAction opts = do
 
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
-    forM_ instrumentConfigs $ \( instrumentFilters
+    forM_ instrumentConfigs $ \( instrumentName
+                               , instrumentFilters
                                , instrumentFiltersT
                                , instrumentMetadataFields
                                , experimentFields
@@ -458,6 +532,12 @@ showNewAction opts = do
                                , defaultInstitutionalDepartmentName
                                , defaultInstitutionalAddress
                                , defaultOperators) -> do
+
+            liftIO $ putStrLn ""
+            liftIO $ putStrLn ""
+            liftIO $ putStrLn $ "Instrument: " ++ instrumentName
+            liftIO $ putStrLn ""
+
             _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
 
             case _ogroups of Left err -> undefined
@@ -478,11 +558,16 @@ showNewAction opts = do
 
                                                  recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
 
+                                                 {-
                                                  let newPatients = S.toList $ S.fromList $ map (\(p, _, _, _, _) -> p) recentOgroups
 
                                                  forM_ newPatients $ \p -> do
                                                     let pname = M.lookup "PatientName" (opMainDicomTags p)
                                                     liftIO $ putStrLn $ opID p ++ " " ++ show pname
+                                                 -}
+                                                 forM_ recentOgroups $ \(p, stud, ser, _, _) -> do
+                                                    let pname = M.lookup "PatientName" (opMainDicomTags p)
+                                                    liftIO $ print (pname, opID p, ostudyID stud, oseriesID ser)
 
 {-
 -- Single worker that talks to the database to create things.
@@ -568,14 +653,14 @@ caiProjectID files = let oneFile = headMay files in
 
   where
 
-    is5digits :: String -> Bool
-    is5digits s = (length s == 5) && (isJust $ (readMaybe s :: Maybe Integer))
+is5digits :: String -> Bool
+is5digits s = (length s == 5) && (isJust $ (readMaybe s :: Maybe Integer))
 
-    readMaybe :: (Read a) => String -> Maybe a
-    readMaybe s =
-      case reads s of
-          [(a, "")] -> Just a
-          _         -> Nothing
+readMaybe :: (Read a) => String -> Maybe a
+readMaybe s =
+  case reads s of
+      [(a, "")] -> Just a
+      _         -> Nothing
 
 identifyExperiment
     :: String
@@ -586,26 +671,27 @@ identifyExperiment
     -> [DicomFile -> Maybe String]
     -> [DicomFile -> Maybe String]
     -> [DicomFile]
-    -> Maybe IdentifiedExperiment
+    -> Either String IdentifiedExperiment
 identifyExperiment schemaExperiment defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators titleFields instrumentFields files = do
     let title = join (allJust <$> (\f -> titleFields <*> [f]) <$> oneFile)
         _title = ((\f -> titleFields <*> [f]) <$> oneFile)
 
-    when (isNothing instrument) $ error $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile
+    case instrument of
+        Nothing -> Left $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile -- when (isNothing instrument) $ error $ "Error: empty instrument when using supplied fields on file: " ++ show oneFile
+        Just instrument' -> do
+                               let m' = M.insert "Instrument" instrument' m
 
-    let m' = M.insert "Instrument" (fromJust instrument) m
+                               let m'' = case caiProjectID files of
+                                                   A.Success caiID -> M.insert "Project" ("Project " ++ caiID) m'
+                                                   A.Error _       -> m'
 
-    let m'' = case caiProjectID files of
-                        A.Success caiID -> M.insert "Project" ("Project " ++ caiID) m'
-                        A.Error _       -> m'
-
-    case title of
-        Nothing -> error $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
-        Just title' -> Just $ IdentifiedExperiment
-                                description
-                                institution
-                                (intercalate "/" title')
-                                [(schemaExperiment, m'')]
+                               case title of
+                                   Nothing     -> Left $ "Error: empty experiment title when using supplied fields on file: " ++ show oneFile
+                                   Just title' -> Right $ IdentifiedExperiment
+                                                           description
+                                                           institution
+                                                           (intercalate "/" title')
+                                                           [(schemaExperiment, m'')]
   where
     oneFile = headMay files
 
@@ -743,7 +829,8 @@ getConfig host orthHost f debug = do
 readInstrumentConfigs
   :: FilePath
      -> IO
-          [([DicomFile -> Bool],
+          [(String,
+            [DicomFile -> Bool],
             [(String, String)],
             [DicomFile -> Maybe String],
             [DicomFile -> Maybe String],
@@ -762,7 +849,8 @@ readInstrumentConfig
   :: Config
        -> T.Text
        -> IO
-            ([DicomFile -> Bool],
+            (String,
+             [DicomFile -> Bool],
              [(String, String)],
              [DicomFile -> Maybe String],
              [DicomFile -> Maybe String],
@@ -816,7 +904,7 @@ readInstrumentConfig cfg instrumentName = do
          , defaultInstitutionalAddress
          , defaultOperators
          ) of
-        (Just instrumentFields', Just instrumentFieldsT', Just instrumentMetadataFields', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (instrumentFields', instrumentFieldsT', instrumentMetadataFields', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
+        (Just instrumentFields', Just instrumentFieldsT', Just instrumentMetadataFields', Just experimentFields', Just datasetFields', Just schemaExperiment', Just schemaDataset', Just schemaFile', Just defaultInstitutionName', Just defaultInstitutionalDepartmentName', Just defaultInstitutionalAddress', Just defaultOperators') -> return (T.unpack instrumentName, instrumentFields', instrumentFieldsT', instrumentMetadataFields', experimentFields', datasetFields', schemaExperiment', schemaDataset', schemaFile', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', defaultOperators')
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
   where

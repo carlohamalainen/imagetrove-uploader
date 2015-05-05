@@ -83,9 +83,11 @@ deleteLastUpdate fp hashes = do
 
 data AcidAction = AcidLoadMap FilePath
                 | AcidUpdateMap FilePath PatientStudySeries (Maybe ZonedTime)
+                deriving Show
 
 data AcidOutput = AcidMap (Map.Map Key Value)
                 | AcidNothing
+                deriving Show
 
 acidWorker m = forever $ do
     (action, o) <- takeMVar m

@@ -355,24 +355,50 @@ getSeriesArchive :: String -> ReaderT MyTardisConfig IO (Either String (FilePath
 getSeriesArchive sid = do
     host <- askHost
 
-    writeLog $ "getSeriesArchive: " ++ sid
+    tmp <- mytardisTmp <$> ask
+
+    tempDir <- liftIO $ createTempDirectory tmp "dicomOrthancConversion"
+    let zipfile = tempDir </> (sid ++ ".zip")
+
+    let url = host </> "series" </> sid </> "archive"
+
+    let cmd = "wget"
+    let args = ["-q", url, "-O", zipfile]
+
+    liftIO $ print ("getSeriesArchive", cmd, args)
+
+    getZipResult <- liftIO $ runShellCommand (dropFileName zipfile) cmd args
+
+    liftIO $ print ("getSeriesArchive", getZipResult)
+
+    case getZipResult of
+        Left e  -> return $ Left e
+        Right _ -> do liftIO $ putStrLn $ "getSeriesArchive: successfully downloaded " ++ zipfile
+                      return $ Right (tempDir, zipfile)
+
+    {-
+    writeLog $ "getSeriesArchive 1: " ++ sid
 
     r <- liftIO $ getWith opts (host </> "series" </> sid </> "archive")
 
-    tmp <- mytardisTmp <$> ask
+    writeLog $ "getSeriesArchive 2: " ++ sid ++ " finished."
+
 
     case r ^? responseBody of
         Just body -> liftIO $ catch (do tempDir <- createTempDirectory tmp "dicomOrthancConversion"
                                         let zipfile = tempDir </> (sid ++ ".zip")
                                         BL.writeFile zipfile body
+                                        putStrLn $ "getSeriesArchive 4: write zip file: " ++ zipfile
                                         return $ Right (tempDir, zipfile))
-                                    (\e -> return $ Left $ show (e :: IOException))
-        Nothing   -> return $ Left $ "Error: empty response body in getSeriesArchive for series " ++ sid
+                                    (\e -> do putStrLn $ "getSeriesArchive 5: error, IO exception: " ++ show (e :: IOException)
+                                              return $ Left $ show (e :: IOException))
+        Nothing   -> return $ Left $ "Error: getSeriesArchive 6: empty response body in getSeriesArchive for series " ++ sid
+    -}
+
 
 unpackArchive :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
 unpackArchive tmp tempDir zipfile = catch
-    (do setCurrentDirectory tempDir
-        unzipResult <- runShellCommand "unzip" ["-q", "-o", zipfile]
+    (do unzipResult <- runShellCommand tempDir "unzip" ["-q", "-o", zipfile]
 
         case unzipResult of
             Left e  -> return $ Left e

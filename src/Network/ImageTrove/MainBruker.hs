@@ -238,7 +238,6 @@ tarBrukerDirectory tempDir dir = do
     print ("up", up)
     print ("title", title)
 
-    setCurrentDirectory up -- FIXME catch exception?
 
     let tarball = tempDir </> (title ++ ".tar.gz")
 
@@ -246,7 +245,7 @@ tarBrukerDirectory tempDir dir = do
         args    = ["zcf", tarball, title]
 
     putStrLn $ "Running: " ++ show (cmd, args)
-    tarballResult <- runShellCommand cmd args
+    tarballResult <- runShellCommand up cmd args
 
     setCurrentDirectory oldCwd
 
@@ -269,9 +268,6 @@ brukerToMinc tempDir dir = do
     print ("up", up)
     print ("title", title)
 
-    setCurrentDirectory up -- FIXME catch exception?
-    putStrLn $ "brukerToMinc: working in directory: " ++ up
-
     -- The series directories are directory names that are numbers. We have to process
     -- them individually because pvconv blows up and gives up if it can't handle one of them.
     series <- (filter isNumber) <$> getDirectoryContents dir
@@ -287,7 +283,7 @@ brukerToMinc tempDir dir = do
         cwd <- getCurrentDirectory
         putStrLn $ "Running: " ++ show (cmd, args) ++ " in directory " ++ cwd
 
-        x <- runShellCommand' cmd args
+        x <- runShellCommand' up cmd args
         putStrLn $ "Output: " ++ show x
 
     setCurrentDirectory oldCwd
@@ -483,7 +479,7 @@ safeMove topDir dir destination = do
 
     print (cmd, args)
 
-    x <- runShellCommand cmd args
+    x <- runShellCommand topDir cmd args
     print x
 
     let result4 = case x of err@(Left _) -> err
