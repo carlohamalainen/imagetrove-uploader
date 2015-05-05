@@ -28,7 +28,7 @@ import Data.Maybe (isNothing, isJust, fromJust)
 import Data.Traversable (traverse)
 import Network.HTTP.Client (defaultManagerSettings, managerResponseTimeout)
 import Network.Mime()
-import Network.Wreq
+import Network.Wreq hiding (getWith)
 
 import Network.MyTardis.API (writeLog, MyTardisConfig(..))
 
@@ -47,7 +47,7 @@ import qualified Data.Map as M
 import System.IO.Temp
 
 import Data.Dicom (createLinksDirectoryFromList, getRecursiveContentsList)
-import Network.ImageTrove.Utils (runShellCommand)
+import Network.ImageTrove.Utils (runShellCommand, getWithE)
 
 import Network.MyTardis.API (allSuccesses)
 
@@ -207,73 +207,85 @@ getPatients :: ReaderT MyTardisConfig IO (Result [String])
 getPatients = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "patients")
+    r <- liftIO $ getWithE opts (host </> "patients")
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
-        Nothing     -> Error "Could not decode resource."
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                        Just v      -> fromJSON v
+                        Nothing     -> Error "Could not decode resource."
 
 getPatient :: String -> ReaderT MyTardisConfig IO (Result OrthancPatient)
 getPatient oid = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "patients" </> oid)
+    r <- liftIO $ getWithE opts (host </> "patients" </> oid)
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> let p = fromJSON v in
-                         case opIsStable <$> p of
-                            Success True    -> p
-                            Success False   -> Error $ "Patient " ++ oid ++ " is not stable in Orthanc."
-                            Error   e       -> Error $ "Could not get patient " ++ oid ++ ", error: " ++ e
-        Nothing     -> Error $ "Could not decode resource for patient " ++ oid
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                       Just v  -> let p = fromJSON v in
+                                        case opIsStable <$> p of
+                                           Success True    -> p
+                                           Success False   -> Error $ "Patient " ++ oid ++ " is not stable in Orthanc."
+                                           Error   e       -> Error $ "Could not get patient " ++ oid ++ ", error: " ++ e
+                       Nothing -> Error $ "Could not decode resource for patient " ++ oid
 
 getStudy :: String -> ReaderT MyTardisConfig IO (Result OrthancStudy)
 getStudy sid = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "studies" </> sid)
+    r <- liftIO $ getWithE opts (host </> "studies" </> sid)
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> let s = fromJSON v in
-                         case ostudyIsStable <$> s of
-                            Success True    -> s
-                            Success False   -> Error $ "Study " ++ sid ++ " is not stable in Orthanc."
-                            Error   e       -> Error $ "Could not get study " ++ sid ++ ", error: " ++ e
-        Nothing     -> Error $ "Could not decode resource for study " ++ sid
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                       Just v      -> let s = fromJSON v in
+                                        case ostudyIsStable <$> s of
+                                           Success True    -> s
+                                           Success False   -> Error $ "Study " ++ sid ++ " is not stable in Orthanc."
+                                           Error   e       -> Error $ "Could not get study " ++ sid ++ ", error: " ++ e
+                       Nothing     -> Error $ "Could not decode resource for study " ++ sid
 
 getSeries :: String -> ReaderT MyTardisConfig IO (Result OrthancSeries)
 getSeries sid = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "series" </> sid)
+    r <- liftIO $ getWithE opts (host </> "series" </> sid)
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> let s = fromJSON v in
-                         case oseriesIsStable <$> s of
-                            Success True    -> s
-                            Success False   -> Error $ "Series " ++ sid ++ " is not stable in Orthanc."
-                            Error   e       -> Error $ "Could not get series " ++ sid ++ ", error: " ++ e
-        Nothing     -> Error $ "Could not decode resource for study " ++ sid
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                       Just v      -> let s = fromJSON v in
+                                        case oseriesIsStable <$> s of
+                                           Success True    -> s
+                                           Success False   -> Error $ "Series " ++ sid ++ " is not stable in Orthanc."
+                                           Error   e       -> Error $ "Could not get series " ++ sid ++ ", error: " ++ e
+                       Nothing     -> Error $ "Could not decode resource for study " ++ sid
 
 getInstance :: String -> ReaderT MyTardisConfig IO (Result OrthancInstance)
 getInstance iid = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "instances" </> iid)
+    r <- liftIO $ getWithE opts (host </> "instances" </> iid)
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
-        Nothing     -> Error $ "Could not decode resource for instance " ++ iid
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                       Just v      -> fromJSON v
+                       Nothing     -> Error $ "Could not decode resource for instance " ++ iid
 
 getTags :: String -> ReaderT MyTardisConfig IO (Result OrthancTags)
 getTags iid = do
     host <- askHost
 
-    r <- liftIO $ getWith opts (host </> "instances" </> iid </> "tags")
+    r <- liftIO $ getWithE opts (host </> "instances" </> iid </> "tags")
 
-    return $ case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> fromJSON v
-        Nothing     -> Error $ "Could not decode resource for instance " ++ iid
+    return $ case r of
+        Left e   -> Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                        Just v      -> fromJSON v
+                        Nothing     -> Error $ "Could not decode resource for instance " ++ iid
 
 getPatientsStudies :: OrthancPatient -> ReaderT MyTardisConfig IO [Result OrthancStudy]
 getPatientsStudies patient = mapM getStudy $ opStudies patient

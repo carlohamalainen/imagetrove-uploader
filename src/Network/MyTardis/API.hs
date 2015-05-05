@@ -5,7 +5,7 @@ module Network.MyTardis.API where
 import Control.Monad.Trans (liftIO)
 import Data.Either
 import Control.Applicative
-import Control.Exception.Base (catch, IOException(..))
+import Control.Exception.Base (catch, IOException(..), SomeException(..))
 import Control.Lens
 import Control.Monad
 import Control.Monad.Identity
@@ -42,7 +42,7 @@ import Text.Printf (printf)
 import qualified Data.Map as M
 
 import Data.Dicom
-import Network.ImageTrove.Utils (computeChecksum)
+import Network.ImageTrove.Utils (computeChecksum, getWithE, postWithE, deleteWithE)
 import Network.MyTardis.Types
 import Network.MyTardis.RestTypes
 import Network.ImageTrove.Utils (runShellCommand)
@@ -97,12 +97,12 @@ defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp = MyTardisC
     -- See 'settingDisableCertificateValidation' in http://hackage.haskell.org/package/connection-0.2.3/docs/Network-Connection.html
     tlsManager = NetworkHTTPConduit.mkManagerSettings (NetworkConnection.TLSSettingsSimple True False False) Nothing
 
--- | Wrapper around Wreq's 'postWith' that uses our settings in a 'ReaderT'.
-postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
+-- | Wrapper around postWithE that uses our settings in a 'ReaderT'.
+postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 postWith' x v = do
     MyTardisConfig host apiBase user pass opts _ _ _ _ _ <- ask
     writeLog $ "postWith': " ++ show (x, v)
-    liftIO $ postWith opts (host ++ apiBase ++ x) v
+    liftIO $ postWithE opts (host ++ apiBase ++ x) v
 
 -- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
@@ -122,14 +122,16 @@ createResource resourceURL getFn keyValueMap = do
 
     r <- postWith' resourceURL (toJSON keyValueMap)
 
-    let url = B8.unpack <$> r ^? responseHeader "Location"
+    case r of
+        Left e   -> return $ Error e
+        Right r' -> do let url = B8.unpack <$> r' ^? responseHeader "Location"
 
-    writeLog $ "createResource: received url: " ++ show url
+                       writeLog $ "createResource: received url: " ++ show url
 
-    host <- myTardisHost <$> ask
+                       host <- myTardisHost <$> ask
 
-    case url of Just url' -> getFn $ drop (length host) url'
-                Nothing   -> return $ Error "Failed to fetch newly created resource."
+                       case url of Just url' -> getFn $ drop (length host) url'
+                                   Nothing   -> return $ Error $ "Failed to fetch newly created resource: " ++ resourceURL
 
 -- | Update a resource.
 updateResource :: (Show a, ToJSON a) =>
@@ -435,12 +437,14 @@ getResource uri = do
     writeLog $ "getResource: " ++ uri
 
     MyTardisConfig host _ _ _ opts _ _ _ _ _ <- ask
-    r <- liftIO $ getWith opts (host ++ uri)
+    r <- liftIO $ getWithE opts (host ++ uri)
 
-    case (join $ decode <$> r ^? responseBody :: Maybe Value) of
-        Just v      -> return $ fromJSON v
-        Nothing     -> do writeLog "getResource: could not decode resource."
-                          return $ Error "Could not decode resource."
+    case r of
+        Left e -> return $ Error e
+        Right r' -> case (join $ decode <$> r' ^? responseBody :: Maybe Value) of
+                        Just v  -> return $ fromJSON v
+                        Nothing -> do writeLog "getResource: could not decode resource."
+                                      return $ Error "Could not decode resource."
 
 -- getParameterName :: URI -> ReaderT MyTardisConfig IO (Result RestParameterName)
 -- getParameterName = getResource
@@ -521,19 +525,21 @@ getList url = do
     writeLog $ "getList: " ++ url
 
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
-    body <- liftIO $ (^? responseBody) <$> getWith opts (host ++ apiBase ++ url)
+    body <- liftIO $ (fmap (^? responseBody)) <$> getWithE opts (host ++ apiBase ++ url)
 
-    let objects = join $ getObjects <$> body
+    case body of
+        Left e -> return $ Error e
+        Right body' -> do let objects = join $ getObjects <$> body'
 
-        next   = case fmap emNext <$> (fromJSON <$> join (getMeta <$> body)) of
-                    (Just (Success (Just nextURL))) -> Just $ dropIfPrefix apiBase nextURL
-                    _                               -> Nothing
+                              next   = case fmap emNext <$> (fromJSON <$> join (getMeta <$> body')) of
+                                          (Just (Success (Just nextURL))) -> Just $ dropIfPrefix apiBase nextURL
+                                          _                               -> Nothing
 
-    let this = maybeToResult $ fromJSON <$> objects :: Result [a]
+                          let this = maybeToResult $ fromJSON <$> objects :: Result [a]
 
-    case next of Just next' -> do rest <- getList next'
-                                  return $ liftM2 (++) this rest
-                 Nothing    -> return this
+                          case next of Just next' -> do rest <- getList next'
+                                                        return $ liftM2 (++) this rest
+                                       Nothing    -> return this
 
 eitherToResult :: Either String (Result t) -> Result t
 eitherToResult (Left e)  = Error e
@@ -644,32 +650,32 @@ copyFileToStore filepath dsf = do
     return results
 
 -- | Delete an experiment.
-deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Response BL.ByteString)
+deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteExperiment x = do
     writeLog $ "deleteExperiment: deleting experiment with ID " ++ show (eiID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
-    liftIO $ deleteWith opts $ host ++ eiResourceURI x
+    liftIO $ deleteWithE opts $ host ++ eiResourceURI x
 
 -- | Delete a dataset.
-deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Response BL.ByteString)
+deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
-    liftIO $ deleteWith opts $ host ++ dsiResourceURI x
+    liftIO $ deleteWithE opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
-deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Response BL.ByteString)
+deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
-    liftIO $ deleteWith opts $ host ++ dsfResourceURI x
+    liftIO $ deleteWithE opts $ host ++ dsfResourceURI x
 
 -- | Delete a parameter.
-deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Response BL.ByteString)
+deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteParameter x = do
     writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
     MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
-    liftIO $ deleteWith opts $ host ++ epResourceURI x
+    liftIO $ deleteWithE opts $ host ++ epResourceURI x
 
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment
 restExperimentToIdentified rexpr = do

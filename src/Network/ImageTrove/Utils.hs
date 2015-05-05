@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Network.ImageTrove.Utils where
 
 import Control.Applicative ((<$>))
@@ -21,6 +23,9 @@ import System.Process.Streaming
 
 import System.Exit
 import System.Directory (getCurrentDirectory)
+
+import Control.Exception
+import Network.Wreq
 
 runShellCommand :: FilePath -> FilePath -> [String] -> IO (Either String String)
 runShellCommand cwd cmd args = do
@@ -53,4 +58,20 @@ sha256 s = (toHex . hashlazy . BSL.pack) (map c2w s)
     toHex :: Strict.ByteString -> String
     toHex bytes = Strict.unpack bytes >>= printf "%02x"
 
+-- Wrapper around various Wreq functions.
 
+getWithE opts x = (Right <$> getWith opts x) `catch` handler
+  where
+    handler (e :: SomeException) = return $ Left $ "Error in getWithE: " ++ show e
+
+putWithE opts x v = (Right <$> putWith opts x v) `catch` handler
+  where
+    handler (e :: SomeException) = return $ Left $ "Error in putWithE: " ++ show e
+
+postWithE opts x v = (Right <$> postWith opts x v) `catch` handler
+  where
+    handler (e :: SomeException) = return $ Left $ "Error in postWithE: " ++ show e
+
+deleteWithE opts x = (Right <$> deleteWith opts x) `catch` handler
+  where
+    handler (e :: SomeException) = return $ Left $ "Error in deleteWithE: " ++ show e
