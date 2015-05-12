@@ -214,9 +214,6 @@ anonymizeDicomFile f = do
 uploadDicomAction opts origDir = do
     liftIO $ print "uploadDicomAction: entering."
 
-    -- Timezone:
-    ZonedTime _ tz <- liftIO getZonedTime
-
     debug <- mytardisDebug <$> ask
 
     cwd <- liftIO getCurrentDirectory
@@ -226,98 +223,74 @@ uploadDicomAction opts origDir = do
     let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
     liftIO $ createDirectoryIfMissing True fp
 
+    conf <- ask
+
+    acidMVar       <- liftIO $ newEmptyMVar
+    experimentMVar <- liftIO $ newEmptyMVar
+    datasetMVar    <- liftIO $ newEmptyMVar
+    groupMVar      <- liftIO $ newEmptyMVar
+
+    -- FIXME Would be nicer if we could avoid the runReaderT stuff here?
+    asyncAcidWorker             <- liftIO $ async $ acidWorker acidMVar
+    asyncWorkerCreateExperiment <- liftIO $ async $ runReaderT (workerCreateExperiment experimentMVar) conf
+    asyncWorkerCreateDataset    <- liftIO $ async $ runReaderT (workerCreateDataset    datasetMVar)    conf
+    asyncWorkerCreateGroup      <- liftIO $ async $ runReaderT (workerCreateGroup      groupMVar)      conf
+
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
+    tasks <- concat <$> forM instrumentConfigs (makeTasks conf debug fp acidMVar experimentMVar datasetMVar groupMVar)
 
-    forM_ instrumentConfigs $ \( instrumentName
-                               , instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators) -> do
+    liftIO $ putStrLn $ "uploadDicomAction: found " ++ show (length tasks) ++ " tasks to process."
 
-            liftIO $ putStrLn ""
-            liftIO $ putStrLn ""
-            liftIO $ putStrLn $ "Instrument: " ++ instrumentName
-            liftIO $ putStrLn ""
+    -- FIXME Add an ID to the config so that logging has a task ID.
+    liftIO $ withPool 15 $ \pool -> parallel_ pool tasks
 
-            _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+    pollExperiment <- liftIO $ poll asyncWorkerCreateExperiment
+    pollDataset    <- liftIO $ poll asyncWorkerCreateDataset
+    pollGroup      <- liftIO $ poll asyncWorkerCreateGroup
+    pollAcid       <- liftIO $ poll asyncAcidWorker
 
-            case _ogroups of Left err -> undefined
-                             Right ogroups -> do
-                                                 let -- Times that available *series* have been updated:
-                                                     updatedTimes = map (\(_, _, s, _, _) -> (getSeriesLastUpdate tz s)) ogroups :: [Maybe ZonedTime]
-
-                                                     -- Hash of each:
-                                                     hashes = map (\(patient, study, series, _, _) -> getHashes (patient, study, series)) ogroups
-
-                                                     -- Together:
-                                                     hashAndLastUpdated = zip hashes updatedTimes
-
-                                                 liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
-
-                                                 acidMVar <- liftIO $ newEmptyMVar
-                                                 asyncAcidWorker <- liftIO $ async $ acidWorker acidMVar
-
-                                                 recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
-
-                                                 liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
-                                                 liftIO $ getZonedTime >>= print
-
-                                                 conf <- ask
-
-                                                 experimentMVar <- liftIO $ newEmptyMVar
-                                                 datasetMVar    <- liftIO $ newEmptyMVar
-                                                 groupMVar      <- liftIO $ newEmptyMVar
-
-                                                 -- FIXME Would be nicer if we could avoid the runReaderT stuff here?
-                                                 asyncWorkerCreateExperiment <- liftIO $ async $ runReaderT (workerCreateExperiment experimentMVar) conf
-                                                 asyncWorkerCreateDataset    <- liftIO $ async $ runReaderT (workerCreateDataset    datasetMVar)    conf
-                                                 asyncWorkerCreateGroup      <- liftIO $ async $ runReaderT (workerCreateGroup      groupMVar)      conf
-
-                                                 -- let tasks = map (blaaah acidMVar experimentMVar datasetMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields) recentOgroups 
-                                                 --    tasks' = map (\t -> runReaderT t conf) tasks
-
-                                                 -- FIXME Add an ID to the config so that logging has a task ID.
-
-                                                 -- liftIO $ withPool 4 $ \pool -> parallel_ pool tasks'
-                                                 -- liftIO $ forM_ tasks' (liftM id)
-
-                                                 -- liftIO $ forM_ (take 10 tasks') forkIO -- FIXME Not terribly efficient due to repeated re-scans...
-
-                                                 let fn = \og -> runReaderT (blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields og) conf
-
-                                                 -- liftIO $ myPool fn recentOgroups
-                                                 -- liftIO $ fn $ head recentOgroups
-
-                                                 let tasks = map fn recentOgroups
-
-                                                 -- FIXME Add an ID to the config so that logging has a task ID.
-
-                                                 liftIO $ withPool 10 $ \pool -> parallel_ pool tasks
-
-                                                 pollExperiment <- liftIO $ poll asyncWorkerCreateExperiment
-                                                 pollDataset    <- liftIO $ poll asyncWorkerCreateDataset
-                                                 pollGroup      <- liftIO $ poll asyncWorkerCreateGroup
-                                                 pollAcid       <- liftIO $ poll asyncAcidWorker
-
-                                                 liftIO $ putStrLn $ "poll pollExperiment: " ++ show pollExperiment
-                                                 liftIO $ putStrLn $ "poll pollDataset: " ++ show pollDataset
-                                                 liftIO $ putStrLn $ "poll pollGroup: " ++ show (pollGroup :: Maybe (Either SomeException ()))
-                                                 liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
-
-                                                 --    tasks' = map (\t -> runReaderT t conf) tasks
-
-                                                 liftIO $ print "uploadDicomAction: finishing inner loop on instrument."
+    liftIO $ putStrLn $ "poll pollExperiment: " ++ show pollExperiment
+    liftIO $ putStrLn $ "poll pollDataset: " ++ show pollDataset
+    liftIO $ putStrLn $ "poll pollGroup: " ++ show (pollGroup :: Maybe (Either SomeException ()))
+    liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
 
     liftIO $ print "uploadDicomAction: exiting."
- 
+
+makeTasks conf debug fp acidMVar experimentMVar datasetMVar groupMVar iconfig = do
+    let ( instrumentName, instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = iconfig
+
+    liftIO $ putStrLn ""
+    liftIO $ putStrLn ""
+    liftIO $ putStrLn $ "Instrument: " ++ instrumentName
+    liftIO $ putStrLn ""
+
+    _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
+
+    -- Timezone:
+    ZonedTime _ tz <- liftIO getZonedTime
+
+    case _ogroups of Left err -> undefined
+                     Right ogroups -> do
+                                         let -- Times that available *series* have been updated:
+                                             updatedTimes = map (\(_, _, s, _, _) -> (getSeriesLastUpdate tz s)) ogroups :: [Maybe ZonedTime]
+
+                                             -- Hash of each:
+                                             hashes = map (\(patient, study, series, _, _) -> getHashes (patient, study, series)) ogroups
+
+                                             -- Together:
+                                             hashAndLastUpdated = zip hashes updatedTimes
+
+                                         liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
+
+                                         recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
+
+                                         liftIO $ putStrLn $ "Experiments that are recent enough for us to process: " ++ show recentOgroups
+                                         liftIO $ getZonedTime >>= print
+
+                                         let fn = \og -> runReaderT (blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields og) conf
+
+                                         return $ map fn recentOgroups
+
 blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
     here <- liftIO getZonedTime
     liftIO $ print ("blaaah", "entering at time", here, opID patient, ostudyID study, oseriesID series)
