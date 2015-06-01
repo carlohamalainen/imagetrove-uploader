@@ -32,6 +32,8 @@ import Text.Printf (printf)
 
 import qualified Data.Set as S
 
+import Data.List.Split (splitEvery)
+
 import Data.Dicom
 import Network.ImageTrove.Utils
 import Network.MyTardis.API
@@ -845,11 +847,13 @@ imageTroveMain = do
 
     case mytardisOpts of
         (Just mytardisOpts') -> do instrumentConfigs <- readInstrumentConfigs f -- FIXME use opts from cmdline parser (optConfigFile opts)
-                                   forM_ instrumentConfigs $ \iconfig -> runReaderT (runDCMTK f iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
+                                   -- forM_ instrumentConfigs $ \iconfig -> do let (_, _, instrumentFiltersT, _, _, _, _, _, _, _, _, _, _) = iconfig
+                                   --                                          liftIO $ print instrumentFiltersT
+
+                                   -- forM_ instrumentConfigs $ \iconfig -> runReaderT (runDCMTK f iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
+                                   -- runReaderT (runDCMTK f instrumentConfigs "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
+                                   runReaderT (runDCMTK f instrumentConfigs "/export/nif02/imagetrove/test/") mytardisOpts'
         _                    -> error $ "Could not read config file: " ++ f
-
-
-
 
 nrWorkersGlobal = 20
 
@@ -1100,7 +1104,7 @@ finishSeries acidDir mvars iconfig resources dcmtkSeries = do
 
                                                                -- FIXME produce warnings about lefts of mincThumbnails and niftis
 
-                                                               liftIO $ do callWorkerIO acidMVar (AcidUpdateMap acidDir (studyDirName, seriesDesc) studyLastUpdate)
+                                                               liftIO $ do callWorkerIO acidMVar (AcidUpdateMap acidDir studyDirName studyLastUpdate)
                                                                            putStrLn $ "Updated last update."
 
                                                                liftIO $ print "done"
@@ -1136,22 +1140,60 @@ renameMinc dfiles (tempDir, _mincFiles) = do
                                          rename old new
     return $ map myRenamer _mincFiles
 
-seriesToProcess :: MVar (AcidAction, MVar AcidOutput)
-                -> FilePath
-                -> [DCMTKSeries]
-                -> IO [DCMTKSeries]
-seriesToProcess acidMVar fp series = do
-    AcidMap m <- callWorkerIO acidMVar (AcidLoadMap fp)
+isStudyNewer m (_, studyDirName, studyLastUpdate) = case M.lookup studyDirName m of
+                                                            Nothing         -> True -- Haven't seen this before so we must process it.
+                                                            Just luPrevious -> zonedTimeToUTC luPrevious < zonedTimeToUTC studyLastUpdate -- Check if current update time is newer.
 
-    filterM (f m) series
+chooseConfig :: [InstrumentConfig] -> (FilePath, String, ZonedTime) -> IO InstrumentConfig
+chooseConfig iconfigs s@(studyDir, studyDirName, studyLastUpdate) = do
+    files <- getDicomFilesInDirectory ".IMA" studyDir
+
+    case files of
+        []       -> throwM $ OtherImagetroveException $ "Empty study directory: " ++ studyDir
+        (file:_) -> do m <- readDicomMetadata file
+                       case m of
+                         Left err -> throwM $ OtherImagetroveException $ "Could not read DICOM metadata from file " ++ file
+                         Right m' -> case filter (isMatch m') iconfigs of
+                                        []        -> throwM $ OtherImagetroveException $ "No matching instrument for study in directory " ++ studyDir
+                                        [iconfig] -> return iconfig
+                                        ics       -> throwM $ OtherImagetroveException $ "Multiple instrument matches for study in directory " ++ studyDir
 
   where
-    f m (_, studyDirName, studyLastUpdate, [])                  = throwM $ OtherImagetroveException $ "Empty series in seriesToProcess."
-    f m (_, studyDirName, studyLastUpdate, ((_, seriesDesc):_)) = return $ case M.lookup (studyDirName, seriesDesc) m of
-                                                                    Nothing         -> True -- Haven't seen this before so we must process it.
-                                                                    Just luPrevious -> zonedTimeToUTC luPrevious < zonedTimeToUTC studyLastUpdate -- Check if current update time is newer.
+    isMatch :: DicomFile -> InstrumentConfig -> Bool
+    isMatch m iconfig = let (_, _, instrumentFiltersT, _, _, _, _, _, _, _, _, _, _) = iconfig in
+                            allTrue (map mkSelector instrumentFiltersT) m
 
-runDCMTK configFileName iconfig topDir = do
+    allTrue fns x = and [ f x | f <- fns ]
+ 
+    mkSelector :: (String, String) -> DicomFile -> Bool
+    mkSelector (fieldName, expectedValue) = \dicomFile -> (fieldToFn fieldName) dicomFile == Just expectedValue
+
+
+processStudy :: [InstrumentConfig] -> MVars -> FilePath -> (FilePath, String, ZonedTime) -> MyTardisIO [Maybe SomeException]
+processStudy iconfigs mvars fp s@(studyDir, studyDirName, studyLastUpdate) = do
+    let MVars acidMVar _ _ _ = mvars
+
+    AcidMap m <- callWorker acidMVar (AcidLoadMap fp)
+
+    iconfig <- liftIO $ chooseConfig iconfigs s
+
+    if (isStudyNewer m s)
+        then do liftIO $ print "done"
+                sf <- liftIO $ studyFiles s
+                -- sf <- liftIO $ withPool 5 $ \pool -> parallel pool (map studyFiles s)
+
+                -- Break apart into series
+                let series = _groupBySeries sf
+
+                conf <- ask
+                let seriesTasks = map (\s -> runReaderT (processSeries fp iconfig mvars s) conf) series
+
+                results <- liftIO $ withPool nrWorkersGlobal $ \pool -> parallelE_ pool seriesTasks
+                liftIO $ forM_ results print -- FIXME tidy up
+                return results -- ... or print this stuff one level up
+        else return []
+
+runDCMTK configFileName iconfigs topDir = do
     liftIO $ hSetBuffering stdout LineBuffering
 
     conf <- ask
@@ -1162,8 +1204,6 @@ runDCMTK configFileName iconfig topDir = do
         fp = cwd </> (slashToUnderscore $ "state_" ++ configFileName)
 
     liftIO $ createDirectoryIfMissing True fp
-
-    currentMap <- liftIO $ loadMap fp
 
     acidMVar       <- liftIO $ newEmptyMVar
     experimentMVar <- liftIO $ newEmptyMVar
@@ -1179,27 +1219,16 @@ runDCMTK configFileName iconfig topDir = do
 
     liftIO $ putStrLn $ "runDCMTK..."
 
+    AcidMap currentMap <- callWorker acidMVar (AcidLoadMap fp)
+
     s  <- liftIO $ studyDirs topDir
-    -- sf <- liftIO $ mapM studyFiles s
-    sf <- liftIO $ withPool 10 $ \pool -> parallel pool (map studyFiles s)
+    liftIO $ putStrLn $ "runDCMTK found " ++ (show $ length s) ++ " study directories."
 
-    -- Break apart into series
-    let series = concat $ map _groupBySeries sf
+    let k = 3
 
-    -- Only keep series that are not in the current map
-    -- or the timestamp in the map is older than what
-    -- we just saw (so a directory has been updated).
-
-    series' <- liftIO $ seriesToProcess acidMVar fp series
-
-    liftIO $ print $ length s
-    liftIO $ print $ length sf
-    liftIO $ print $ length series
-    liftIO $ print $ length series'
-
-    let seriesTasks = map (\s -> runReaderT (processSeries fp iconfig mvars s) conf) series'
-
-    liftIO $ withPool nrWorkersGlobal $ \pool -> parallelE_ pool seriesTasks
+    forM_ (splitEvery k s) $ \chunk -> do let tasks = map (\c -> runReaderT (processStudy iconfigs mvars fp c) conf) chunk
+                                          liftIO $ putStrLn $ "Spawning " ++ show k ++ " jobs..."
+                                          liftIO $ withPool k $ \pool -> parallel pool tasks
 
     pollExperiment <- liftIO $ poll asyncWorkerCreateExperiment
     pollDataset    <- liftIO $ poll asyncWorkerCreateDataset

@@ -4,7 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
-module Network.ImageTrove.Acid (acidWorker, callWorkerIO, AcidAction(..), AcidOutput(..), loadMap, Key(..)) where
+module Network.ImageTrove.Acid (acidWorker, callWorkerIO, AcidAction(..), AcidOutput(..), Key(..)) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -27,7 +27,7 @@ import Control.Monad.Catch
 
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
-type Key   = (String, String)
+type Key   = String
 type Value = ZonedTime
 
 data KeyValue = KeyValue !(Map.Map Key Value) deriving (Typeable)
