@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RankNTypes #-}
+{-# LANGUAGE DeriveDataTypeable, OverloadedStrings, RankNTypes #-}
 
 module Data.Dicom where
 
@@ -10,6 +10,7 @@ import Data.List hiding (find)
 import Data.Maybe
 import Control.Applicative ((<$>), (<*>), (<*))
 import Control.Monad
+import Control.Monad.Catch
 import Control.Monad.Identity
 import Control.Monad.Reader
 import Control.Monad.ST
@@ -18,6 +19,7 @@ import Data.Function (on)
 import Data.Ord (comparing)
 import Data.Functor.Identity
 import Data.List (isInfixOf, groupBy, isSuffixOf)
+import Data.Typeable
 import System.Directory
 import System.FilePath
 import System.FilePath.Glob
@@ -292,6 +294,44 @@ data DicomFile = DicomFile
     }
     deriving (Eq, Show)
 
+data DicomException = DicomMissingSeriesInstanceUID FilePath
+                    | ShellError String
+                    | DicomMissingSeriesDescription FilePath
+    deriving (Show, Typeable)
+
+instance Exception DicomException
+
+readSeriesDesc :: FilePath -> IO String
+readSeriesDesc f = do
+{-
+    x <- runShellCommand (dropFileName f) "dcmdump" ["-s", "+P", "0020,000e", f]
+
+    case x of
+        Left e      -> throwM $ ShellError e
+        Right x'    -> case (unescapeEntities <$> parseSingleMatch pSeriesInstanceUID x') of
+                            Nothing   -> throwM $ DicomMissingSeriesInstanceUID f
+                            Just suid -> return suid
+-}
+    seriesDesc <- runShellCommand (dropFileName f) "dcmdump" ["-s", "+P", "0008,103e", f]
+    -- seriesNr   <- runShellCommand (dropFileName f) "dcmdump" ["-s", "+P", "0020,0011", f]
+
+    {-
+    case (seriesDesc, seriesNr) of
+        (Right seriesDesc', Right seriesNr') -> do let seriesDesc'' = unescapeEntities <$> parseSingleMatch pSeriesDescription seriesDesc'
+                                                       seriesNr''   = unescapeEntities <$> parseSingleMatch pSeriesNumber      seriesNr'
+                                                   case (seriesDesc'', seriesNr'') of
+                                                      (Just seriesDesc''', Just seriesNr''') -> return $ seriesDesc''' ++ "_" ++ seriesNr'''
+                                                      _                                      -> throwM $ DicomMissingSeriesDescription f
+        _                                  -> throwM $ DicomMissingSeriesDescription f
+    -}
+
+    case seriesDesc of
+        Right seriesDesc' -> do let seriesDesc'' = unescapeEntities <$> parseSingleMatch pSeriesDescription seriesDesc'
+                                case seriesDesc'' of
+                                      Just seriesDesc''' -> return seriesDesc'''
+                                      _                  -> throwM $ DicomMissingSeriesDescription f
+        _                                  -> throwM $ DicomMissingSeriesDescription f
+
 readDicomMetadata :: FilePath -> IO (Either String DicomFile)
 readDicomMetadata fileName = do
     dump <- dcmDump fileName
@@ -369,7 +409,7 @@ groupDicomFiles instrumentFilters titleFields datasetFields files = map snd <$> 
 
     toTuple file = ((titleFields <*> [file], datasetFields <*> [file]), file)
 
-    -- https://ghc.haskell.org/trac/ghc/ticket/9004
-    sortOn :: Ord b => (a -> b) -> [a] -> [a]
-    sortOn f = map snd . sortBy (comparing fst)
-                       . map (\x -> let y = f x in y `seq` (y, x))
+-- https://ghc.haskell.org/trac/ghc/ticket/9004
+sortOn :: Ord b => (a -> b) -> [a] -> [a]
+sortOn f = map snd . sortBy (comparing fst)
+                   . map (\x -> let y = f x in y `seq` (y, x))

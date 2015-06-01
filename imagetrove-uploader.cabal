@@ -28,7 +28,7 @@ library
   -- other-modules:
   -- other-extensions:
   ghc-options:       -threaded
-  build-depends:       base >=4.6 && <4.7
+  build-depends:       base
                      , wreq
                      , time
                      , convertible
@@ -48,7 +48,7 @@ library
                      , mime-types
                      , http-client
                      , lens
-                     , process-streaming <  0.7.0.0
+                     , process-streaming < 0.7.0.0
                      , pipes-bytestring
                      , optparse-applicative
                      , mtl
@@ -85,6 +85,8 @@ library
                      , parallel-io
                      , stm
                      , async
+                     , exceptions
+                     , conduit
 
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -94,7 +96,7 @@ executable imagetrove-dicom-uploader
   main-is:           MainDicom.hs
   ghc-options:       -threaded
 
-  build-depends:       base >=4.6 && <4.7
+  build-depends:       base
                      , wreq
                      , time
                      , convertible
@@ -114,7 +116,7 @@ executable imagetrove-dicom-uploader
                      , mime-types
                      , http-client
                      , lens
-                     , process-streaming <  0.7.0.0
+                     , process-streaming < 0.7.0.0
                      , pipes-bytestring
                      , optparse-applicative
                      , mtl
@@ -151,12 +153,14 @@ executable imagetrove-dicom-uploader
                      , parallel-io
                      , stm
                      , async
+                     , exceptions
+                     , conduit
 
 executable imagetrove-bruker-uploader
   main-is:           MainBruker.hs
   ghc-options:       -threaded
 
-  build-depends:       base >=4.6 && <4.7
+  build-depends:       base
                      , wreq
                      , time
                      , convertible
@@ -176,7 +180,7 @@ executable imagetrove-bruker-uploader
                      , mime-types
                      , http-client
                      , lens
-                     , process-streaming <  0.7.0.0
+                     , process-streaming < 0.7.0.0
                      , pipes-bytestring
                      , optparse-applicative
                      , mtl
@@ -213,3 +217,5 @@ executable imagetrove-bruker-uploader
                      , parallel-io
                      , stm
                      , async
+                     , exceptions
+                     , conduit

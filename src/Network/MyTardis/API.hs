@@ -223,8 +223,8 @@ createExperiment ie@(IdentifiedExperiment description instutitionName title meta
                               return $ Success re
         Left NoMatches  -> do writeLog "createExperiment: no matches, creating the experiment resource."
                               createResource "/experiment/" getExperiment m
-        Left  _         -> do writeLog "Duplicate experiments found, refusing to create another."
-                              return $ Error "Duplicate experiment detected, will not create another."
+        Left  err       -> do writeLog $ "Error when trying to create group: " ++ show err
+                              return $ Error $ show err
   where
     m = object
             [ ("description",       String $ T.pack description)
@@ -782,7 +782,7 @@ getOrCreateGroup name = do
     case groups of
         []              -> createGroup name
         [Success group] -> return $ Success group
-        _               -> return $ Error $ "Duplicate groups found with name: " ++ name
+        groups          -> return $ Error $ "Error when creating group " ++ name ++ ": " ++ show groups
 
 -- | Get or create an ObjectACL that gives a group specified access to an experiment.
 getOrCreateExperimentACL

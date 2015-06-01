@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
-module Network.ImageTrove.Acid (acidWorker, callWorkerIO, PatientStudySeries(..), AcidAction(..), AcidOutput(..)) where
+module Network.ImageTrove.Acid (acidWorker, callWorkerIO, AcidAction(..), AcidOutput(..)) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -22,10 +22,8 @@ import Control.Concurrent (threadDelay)
 
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
-type PatientStudySeries = (String, String, String)
-
-type Key   = PatientStudySeries
-type Value = Maybe ZonedTime
+type Key   = (String, String)
+type Value = ZonedTime
 
 data KeyValue = KeyValue !(Map.Map Key Value) deriving (Typeable)
 
@@ -63,26 +61,26 @@ loadMap fp = do
         closeAcidState acid
         return m
 
-updateLastUpdate :: FilePath -> PatientStudySeries -> Maybe ZonedTime -> IO ()
-updateLastUpdate fp hashes lastUpdate = do
-    updateLastUpdate' fp hashes lastUpdate `onException` (print "error: exception in updateLastUpdate!" >> threadDelay (1 * 10^6) >> updateLastUpdate fp hashes lastUpdate)
+updateLastUpdate :: FilePath -> Key -> ZonedTime -> IO ()
+updateLastUpdate fp x lastUpdate = do
+    updateLastUpdate' fp x lastUpdate `onException` (print "error: exception in updateLastUpdate!" >> threadDelay (1 * 10^6) >> updateLastUpdate fp x lastUpdate)
   where
-    updateLastUpdate' fp hashes lastUpdate = do
+    updateLastUpdate' fp x lastUpdate = do
         acid <- openLocalStateFrom fp (KeyValue Map.empty)
-        _ <- update acid (InsertKey hashes lastUpdate)
+        _ <- update acid (InsertKey x lastUpdate)
         closeAcidState acid
 
-deleteLastUpdate :: FilePath -> PatientStudySeries -> IO ()
-deleteLastUpdate fp hashes = do
-    deleteLastUpdate' fp hashes `onException` (print "error: exception in deleteLastUpdate!" >> threadDelay (1 * 10^6) >> deleteLastUpdate fp hashes)
+deleteLastUpdate :: FilePath -> Key -> IO ()
+deleteLastUpdate fp x = do
+    deleteLastUpdate' fp x `onException` (print "error: exception in deleteLastUpdate!" >> threadDelay (1 * 10^6) >> deleteLastUpdate fp x)
   where
-    deleteLastUpdate' fp hashes = do
+    deleteLastUpdate' fp x = do
         acid <- openLocalStateFrom fp (KeyValue Map.empty)
-        _ <- update acid (DeleteKey hashes)
+        _ <- update acid (DeleteKey x)
         closeAcidState acid
 
 data AcidAction = AcidLoadMap FilePath
-                | AcidUpdateMap FilePath PatientStudySeries (Maybe ZonedTime)
+                | AcidUpdateMap FilePath Key ZonedTime
                 deriving Show
 
 data AcidOutput = AcidMap (Map.Map Key Value)
@@ -96,8 +94,8 @@ acidWorker m = forever $ do
         AcidLoadMap fp -> do m <- loadMap fp
                              putMVar o (AcidMap m)
 
-        AcidUpdateMap fp hashes lastUpdate -> do updateLastUpdate fp hashes lastUpdate
-                                                 putMVar o AcidNothing
+        AcidUpdateMap fp x lastUpdate -> do updateLastUpdate fp x lastUpdate
+                                            putMVar o AcidNothing
 
 -- FIXME Copied from API.hs
 callWorkerIO :: MVar (t, MVar b) -> t -> IO b
@@ -112,9 +110,9 @@ _foo fp = do
     m <- loadMap fp
     let m' = Map.toList m
 
-    let someone = filter (\((p,_,_),_) -> p == "4837bc2a-557ab998-ee29fd37-bbe498a8-6b3430cc") m'
+    -- let someone = filter (\((p,_,_),_) -> p == "4837bc2a-557ab998-ee29fd37-bbe498a8-6b3430cc") m'
 
-    forM_ someone print
+    -- forM_ someone print
 
     -- Also add option to delete a patient.
 
@@ -124,3 +122,4 @@ _foo fp = do
     -- *Network.ImageTrove.Acid> x
     -- *Network.ImageTrove.Acid> forM_ (map (\(z,_) -> z) x) (deleteLastUpdate "state_sample_config_files_CAI_7T.conf")
 
+    print ()

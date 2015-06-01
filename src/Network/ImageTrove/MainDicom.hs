@@ -1,25 +1,30 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveDataTypeable, OverloadedStrings #-}
 
 module Network.ImageTrove.MainDicom where
 
 import Prelude hiding (lookup)
 
-import Control.Exception
+import Control.Exception (IOException(..))
 
+import Control.Monad.Catch
 import Control.Monad.Reader
-import Control.Monad (forever, when)
+import Control.Monad (forever, when, mapM)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, poll, mapConcurrently)
+import Data.Char (toLower, isAlphaNum)
 import Data.Configurator
 import Data.Configurator.Types
 import Data.Monoid (mempty)
 import Data.Traversable (traverse)
+import Data.Typeable
 import Data.Either
 import qualified Data.Foldable as DF
 import Data.Maybe
-import Data.List (isPrefixOf, intercalate)
+import Data.List (groupBy, sortBy, isPrefixOf, intercalate)
+import Data.Ord (comparing)
 import qualified Data.Map as M
 import qualified Data.Aeson as A
+import Data.Aeson (Result(..))
 import qualified Data.Text as T
 import Options.Applicative
 import Safe (headMay)
@@ -45,10 +50,14 @@ import Data.Time.LocalTime (getZonedTime, utcToZonedTime, zonedTimeToUTC, TimeZo
 import Data.Time.Format (parseTime)
 import System.Locale (defaultTimeLocale)
 
-import System.Directory (getCurrentDirectory, setCurrentDirectory, createDirectoryIfMissing)
-import System.FilePath ((</>))
+import System.Directory (copyFile, createDirectory, getCurrentDirectory, setCurrentDirectory, createDirectoryIfMissing)
+import System.FilePath (makeValid, (</>))
 
 import Network.ImageTrove.Acid
+
+import System.Directory
+import System.FilePath
+import System.Posix.Files
 
 import qualified Data.Map as Map
 
@@ -58,12 +67,15 @@ import Control.Concurrent
 import Control.Concurrent.STM
 
 import Network.Wreq hiding (header)
-import Control.Exception.Base (catch, IOException)
+-- import Control.Exception.Base (catch, IOException)
 import Control.Lens hiding ((.=))
 import System.IO.Temp
 import qualified Data.ByteString.Lazy   as BL
 
 import System.FilePath
+
+import qualified Data.Conduit      as DC
+import qualified Data.Conduit.List as CL
 
 
 data Command
@@ -134,13 +146,18 @@ getDicomDir opts = fromMaybe "." (optDirectory opts)
 hashFiles :: [FilePath] -> String
 hashFiles = sha256 . unwords
 
+createProjectGroup :: MVar (String, MVar (A.Result RestGroup)) -> FilePath -> ReaderT MyTardisConfig IO (A.Result RestGroup)
 createProjectGroup groupMVar linksDir = do
-    projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".dcm" linksDir >>= mapM readDicomMetadata)
+    projectID <- liftIO $ caiProjectID <$> rights <$> (getDicomFilesInDirectory ".IMA" linksDir >>= mapM readDicomMetadata)
+    _createProjectGroup groupMVar projectID
 
+_createProjectGroup groupMVar projectID = do
     case projectID of A.Success projectID' -> do projectResult <- callWorker groupMVar $ "Project " ++ projectID'
                                                  case projectResult of A.Success _              -> liftIO $ putStrLn $ "Created project group: " ++ projectID'
                                                                        A.Error   projErr        -> liftIO $ putStrLn $ "Error when creating project group: " ++ projErr
-                      A.Error   err        -> liftIO $ putStrLn $ "Error: could not retrieve Project ID from ReferringPhysician field: " ++ err
+                                                 return (projectResult :: A.Result RestGroup)
+                      A.Error   err        -> do liftIO $ putStrLn $ "Error: could not retrieve Project ID from ReferringPhysician field: " ++ err
+                                                 return $ A.Error err
 
 uploadAllAction opts = do
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
@@ -150,6 +167,9 @@ uploadAllAction opts = do
 -- | Orthanc returns the date/time but has no timezone so append tz here:
 -- getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
 -- getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
+
+{-
+
 
 -- | Orthanc returns the date/time but has no timezone so append tz here:
 getSeriesLastUpdate :: TimeZone -> OrthancSeries -> Maybe ZonedTime
@@ -169,7 +189,7 @@ patientsToProcess acidMVar fp ogroups hashAndLastUpdated = do
 
     let blah = zip ogroups hashAndLastUpdated
 
-    return $ map fst $ filter (f m) blah
+    return $ Prelude.map fst $ Prelude.filter (f m) blah
 
   where
     f m (_, (h, Just lu)) = case M.lookup h m of
@@ -178,6 +198,7 @@ patientsToProcess acidMVar fp ogroups hashAndLastUpdated = do
                                 Just (Just luPrevious)  -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu  -- hash and LastUpdate in map, compare to see if current update time is newer.
     f m (_, (h, Nothing)) = True
 
+-}
 
 anonymizeDicomFile :: FilePath -> IO (Either String String)
 anonymizeDicomFile f = do
@@ -211,9 +232,41 @@ anonymizeDicomFile f = do
 
                                       runShellCommand (dropFileName f) cmd opts
 
+anonymizeDicomFile' :: FilePath -> IO String
+anonymizeDicomFile' f = do
+    patientID <- (fmap dicomPatientID) <$> (readDicomMetadata f)
+
+    case patientID of
+        Left e                  -> throwM $ AnonymizationException e
+        Right Nothing           -> throwM $ AnonymizationException $ "No PatientID in " ++ f
+        Right (Just patientID') -> do let cmd = "dcmodify"
+                                          opts = [ "-ie"
+                                                 , "-gin"
+                                                 , "-nb"
+                                                 , "-imt"
+                                                 , "-ma", "(0010,0010)=" ++ patientID' -- Patient Name = Patient ID
+                                                 , "-ea", "(0010,0030)" -- Patient birth date
+                                                 , "-ea", "(0008,0050)" -- Accession number
+                                                 , "-ea", "(0020,000D)" -- Study Instance UID
+                                                 , "-ea", "(0020,000E)" -- Series Instance UID
+                                                 , "-ea", "(0008,0018)" -- SOP Instance UID
+                                                 , "-ea", "(0008,0080)" -- Institution Name
+                                                 , "-ea", "(0008,0081)" -- Institution Address
+                                                 , "-ea", "(0008,1070)" -- Operator Name
+                                                 , "-ea", "(0008,1155)" -- Referenced SOP Instance UID
+                                                 , "-ea", "(0010,1000)" -- Other Patient Ids
+                                                 , "-ea", "(0020,0010)" -- Study ID
+                                                 , "-ea", "(0020,4000)" -- Image Comments
+                                                 , f
+                                                 ]
+
+                                      putStrLn $ "anonymizeDicomFile: " ++ show (cmd, opts)
+
+                                      _runShellCommand (dropFileName f) cmd opts
+
 uploadDicomAction opts origDir = do
     liftIO $ print "uploadDicomAction: entering."
-
+{-
     debug <- mytardisDebug <$> ask
 
     cwd <- liftIO getCurrentDirectory
@@ -255,7 +308,11 @@ uploadDicomAction opts origDir = do
     liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
 
     liftIO $ print "uploadDicomAction: exiting."
+-}
 
+
+
+{-
 makeTasks conf debug fp acidMVar experimentMVar datasetMVar groupMVar iconfig = do
     let ( instrumentName, instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) = iconfig
 
@@ -301,9 +358,9 @@ blaaah acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperimen
         Nothing    -> liftIO $ putStrLn $ "Error: could not read Referring Physician Name from " ++ opID patient ++ " " ++ ostudyID study ++ " " ++ oseriesID series
         Just False -> liftIO $ putStrLn $ "Error: invalid project ID: \"" ++ (fromJust projectID) ++ "\" from " ++ opID patient ++ " " ++ ostudyID study ++ " " ++ oseriesID series
         Just True  -> blaaah' acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags)
-        
+
 blaaah' acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperiment schemaDataset schemaDicomFile defaultInstitutionName defaultInstitutionalDepartmentName defaultInstitutionalAddress defaultOperators instrumentFilters instrumentMetadataFields experimentFields datasetFields (patient, study, series, oneInstance, tags) = do
-        
+
     liftIO $ getZonedTime >>= print
     liftIO $ putStrLn $ "getting series archive.... " ++ oseriesID series
     archive <- getSeriesArchive $ oseriesID series
@@ -388,6 +445,8 @@ blaaah' acidMVar experimentMVar datasetMVar groupMVar debug tz fp schemaExperime
                                                      (A.Success (_,                A.Error dsError)) -> liftIO $ putStrLn $ "Error when creating dataset: "        ++ dsError
                                                      (A.Error e)                                     -> liftIO $ putStrLn $ "Error in uploadDicomAsMincOneGroup: " ++ e
     liftIO $ print "blaaah: exiting"
+
+-}
 
 dostuff :: UploaderOptions -> ReaderT MyTardisConfig IO ()
 
@@ -490,6 +549,8 @@ showNewAction opts = do
     let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
     liftIO $ createDirectoryIfMissing True fp
 
+{-
+
     instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
 
     forM_ instrumentConfigs $ \( instrumentName
@@ -541,6 +602,10 @@ showNewAction opts = do
                                                  forM_ recentOgroups $ \(p, stud, ser, _, _) -> do
                                                     let pname = M.lookup "PatientName" (opMainDicomTags p)
                                                     liftIO $ print (pname, opID p, ostudyID stud, oseriesID ser)
+-}
+
+
+
 
 {-
 -- Single worker that talks to the database to create things.
@@ -582,7 +647,7 @@ imageTroveMain = do
     -- Fork it.
     forkIO $ experimentWorker m
 
-    withPool 4 $ \pool -> parallel_ pool [ minion m "0" 0 
+    withPool 4 $ \pool -> parallel_ pool [ minion m "0" 0
                                          , minion m "1" 1
                                          , minion m "2" 2
                                          , minion m "3" 3
@@ -595,8 +660,8 @@ imageTroveMain = do
     print "done"
 -}
 
-imageTroveMain :: IO ()
-imageTroveMain = do
+__imageTroveMain :: IO ()
+__imageTroveMain = do
     opts' <- execParser opts
 
     let host = fromMaybe "http://localhost:8000" $ optHost opts'
@@ -614,17 +679,21 @@ imageTroveMain = do
 
     opts = info (helper <*> pUploaderOptions ) (fullDesc <> header "imagetrove-dicom-uploader - upload DICOM files to a MyTARDIS server" )
 
+caiProjectID'' oneFile = _caiProjectID $ Just oneFile
+
+caiProjectID' :: DFile -> A.Result String
+caiProjectID' (DFile _ oneFile) = _caiProjectID $ Just oneFile
+
 caiProjectID :: [DicomFile] -> A.Result String
-caiProjectID files = let oneFile = headMay files in
-    case oneFile of
+caiProjectID files = let oneFile = headMay files in _caiProjectID oneFile
+
+_caiProjectID oneFile = case oneFile of
         Nothing   -> A.Error "No DICOM files; can't determine CAI Project ID."
         Just file -> case dicomReferringPhysicianName file of
                         Nothing     -> A.Error "Referring Physician Name field is empty; can't determine CAI Project ID."
                         Just rphys  -> if is5digits rphys
                                             then A.Success rphys
                                             else A.Error   $ "Referring Physician Name is not a 5 digit number: " ++ rphys
-
-  where
 
 is5digits :: String -> Bool
 is5digits s = (length s == 5) && (isJust $ (readMaybe s :: Maybe Integer))
@@ -799,16 +868,15 @@ getConfig host orthHost f debug = do
         (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug tmp'
         _                        -> Nothing
 
-readInstrumentConfigs
-  :: FilePath
-     -> IO
-          [(String,
-            [DicomFile -> Bool],
-            [(String, String)],
-            [DicomFile -> Maybe String],
-            [DicomFile -> Maybe String],
-            [DicomFile -> Maybe String],
-            String, String, String, String, String, String, [String])]
+type InstrumentConfig = (String,
+                         [DicomFile -> Bool],
+                         [(String, String)],
+                         [DicomFile -> Maybe String],
+                         [DicomFile -> Maybe String],
+                         [DicomFile -> Maybe String],
+                         String, String, String, String, String, String, [String])
+
+readInstrumentConfigs :: FilePath -> IO [InstrumentConfig]
 readInstrumentConfigs f = do
     cfg <- load [Required f]
 
@@ -818,17 +886,7 @@ readInstrumentConfigs f = do
         Nothing -> error $ "No instruments specified in configuration file: " ++ f
         Just instruments' -> mapM (readInstrumentConfig cfg . T.pack) instruments'
 
-readInstrumentConfig
-  :: Config
-       -> T.Text
-       -> IO
-            (String,
-             [DicomFile -> Bool],
-             [(String, String)],
-             [DicomFile -> Maybe String],
-             [DicomFile -> Maybe String],
-             [DicomFile -> Maybe String],
-             String, String, String, String, String, String, [String])
+readInstrumentConfig :: Config -> T.Text -> IO InstrumentConfig
 readInstrumentConfig cfg instrumentName = do
     instrumentFields <- liftM (map toIdentifierFn)    <$> lookup cfg (instrumentName `T.append` ".instrument")
     instrumentFieldsT<- liftM (map toIdentifierTuple) <$> lookup cfg (instrumentName `T.append` ".instrument")
@@ -889,3 +947,480 @@ readInstrumentConfig cfg instrumentName = do
     toIdentifierTuple :: [String] -> (String, String)
     toIdentifierTuple [field, value] = (field, value)
     toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
+
+
+processStudyDirectory :: MVars -> FilePath -> ReaderT MyTardisConfig IO [IO ()]
+processStudyDirectory mvars sdir = undefined
+{-
+processStudyDirectory mvars sdir = do
+    liftIO $ putStrLn $ "Processing study directory: " ++ sdir
+
+    allFiles <- liftIO $ getStudyFiles sdir
+    liftIO $ putStrLn $ "Found " ++ show (fmap length allFiles) ++ " dicom files."
+
+    series <- liftIO $ joinEither <$> traverse groupBySeries allFiles
+
+    case series of
+        Left err -> undefined
+        Right series' -> do conf <- ask
+                            let processSeriesIO dfiles = runReaderT (processSeries mvars dfiles) conf
+                            return $ map processSeriesIO series'
+-}
+
+--getStudyDirName :: [DicomFilePath] -> String
+--getStudyDirName [] = throwM $ EmptySeriesException "No files in series in getStudyDirName."
+--getStudyDirName (f:_) = (head . drop 1 . reverse . splitDirectories) f
+
+type StudyDirectory = FilePath
+
+data DFile = DFile {
+    dfilePath      :: FilePath
+  , dfileDicomInfo :: DicomFile
+  } deriving Show
+
+type DicomFilePath  = FilePath
+
+getStudyFiles :: StudyDirectory -> IO (Either String [DicomFilePath])
+getStudyFiles sdir = catch (Right <$> getDicomFilesInDirectory ".dcm" sdir)
+                           (\e -> return $ Left $ show (e :: IOException))
+    {-
+    dfiles <- forM files readDicomMetadata
+
+    case lefts dfiles of
+        [] -> return $ Right $ map (\(f, d) -> DFile f d) (zip files (rights dfiles))
+        l  -> do putStrLn $ "Error: could not read DICOM file(s) in " ++ sdir ++ ": " ++ show l
+                 return $ Left $ show l -- urgh, stringly typed error.
+    -}
+
+groupBySeries :: [DicomFilePath] -> IO (Either String [[DicomFilePath]])
+groupBySeries dfiles = do
+    seriesUIDs <- withPool nrWorkersGlobal $ \pool -> parallel pool (Prelude.map readSeriesDesc dfiles)
+
+    let uniqueUIDs = (S.toList . S.fromList) seriesUIDs
+        result = Prelude.map (fmap snd) [ Prelude.filter (\(uid, _) -> uid == suid) (zip seriesUIDs dfiles) | suid <- uniqueUIDs ] -- inefficient...?
+    putStrLn $ "groupBySeries: found " ++ show (length result) ++ " different series in this study."
+    return $ Right result
+
+squashResultMaybe :: A.Result (Maybe a) -> A.Result a
+squashResultMaybe (A.Success (Just x)) = A.Success x
+squashResultMaybe (A.Success Nothing)  = A.Error $ "Nothing"
+squashResultMaybe (A.Error   e)        = A.Error e
+
+copyToTempDir :: [DFile] -> ReaderT MyTardisConfig IO (A.Result FilePath)
+copyToTempDir dfiles = copyToTempDir' dfiles `catchIOError` (\e -> return $ A.Error $ show (e :: IOException))
+  where
+    copyToTempDir' dfiles = do
+        tmp     <- mytardisTmp <$> ask
+        tempDir <- liftIO $ createTempDirectory tmp "dicom_temp"
+        liftIO $ forM_ dfiles $ \(DFile d _) -> copyFile d tempDir
+        return $ A.Success tempDir
+
+
+data MVars = MVars (MVar (AcidAction,              MVar AcidOutput))
+                   (MVar (IdentifiedExperiment,    MVar (Result RestExperiment)))
+                   (MVar (IdentifiedDataset,       MVar (Result RestDataset)))
+                   (MVar (String,                  MVar (Result RestGroup)))
+
+imageTroveMain :: IO ()
+imageTroveMain = do
+    let host = "http://localhost:8005" -- "https://imagetrove.cai.uq.edu.au"
+        f    = "debug_3T.conf"
+        orthHost = "http://localhost:8043"
+        debug    = False
+
+    mytardisOpts <- getConfig host orthHost f debug
+
+    case mytardisOpts of
+        (Just mytardisOpts') -> do instrumentConfigs <- readInstrumentConfigs f -- FIXME use opts from cmdline parser (optConfigFile opts)
+                                   -- forM_ instrumentConfigs $ \iconfig -> runReaderT (runConduit iconfig "/export/nif02/imagetrove/test") mytardisOpts'
+                                   forM_ instrumentConfigs $ \iconfig -> runReaderT (runConduit iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
+        _                    -> error $ "Could not read config file: " ++ f
+
+
+
+
+nrWorkersGlobal = 20
+
+type MyTardisIO = ReaderT MyTardisConfig IO
+
+-- studyDirs :: FilePath -> DC.Source MyTardisIO (FilePath, String, UTCTime)
+studyDirs :: FilePath -> IO [(FilePath, String, ZonedTime)]
+studyDirs dir = getStableWithNameAndTime 5 dir
+
+-- studyFiles :: DC.Conduit (FilePath, String, UTCTime) MyTardisIO (FilePath, String, UTCTime, [(DicomFilePath, String)])
+-- studyFiles = CL.mapM $ \(sdir, dirname, mtime) -> liftIO $ do
+studyFiles :: (FilePath, String, ZonedTime) -> IO (FilePath, String, ZonedTime, [(FilePath, String)])
+studyFiles (sdir, dirname, mtime) = do
+    files <- getDicomFilesInDirectory ".IMA" sdir
+    suids <- withPool nrWorkersGlobal $ \pool -> parallel pool (map readSeriesDesc files)
+
+    putStrLn $ "studyFiles: found " ++ show (length files) ++ " files in " ++ sdir
+
+    return $ (sdir, dirname, mtime, zip files suids)
+
+-- FIXME How do we use conduit's groupBy????
+-- groupBy :: Monad m => (a -> a -> Bool) -> Conduit a m [a]
+
+--cGroupBySeries :: DC.Conduit [(DicomFilePath, String)] MyTardisIO (String, [Series])
+--cGroupBySeries = CL.map $ \x -> (getStudyDirName (map fst x), map Series (cGroupedBySeries' x))
+--  where
+
+cGroupedBySeries' :: [(DicomFilePath, String)] -> [[(DicomFilePath, String)]]
+cGroupedBySeries' ds = groupBy (\(_, s1) (_, s2) -> s1 == s2) ((sortBy . comparing) snd ds)
+
+type StudyDir = FilePath
+type StudyDirName = String
+type StudyLastUpdate = ZonedTime
+
+type SeriesDesc = String
+
+type Series = [(FilePath, SeriesDesc)]
+
+type DCMTKSeries = (StudyDir, StudyDirName, StudyLastUpdate, Series)
+
+_groupBySeries :: DCMTKSeries -> [DCMTKSeries]
+_groupBySeries (studyDir, studyDirName, studyLastUpdate, series) = map (\s -> (studyDir, studyDirName, studyLastUpdate, s)) series'
+  where
+    f ds = groupBy (\(_, s1) (_, s2) -> s1 == s2) ((sortBy . comparing) snd ds)
+    series' = f series
+
+sink :: DC.Sink [(DicomFilePath, String)] IO ()
+sink = CL.mapM_ print
+
+getBasicMetadata :: DicomFilePath -> IO (String, String, String, String)
+getBasicMetadata d = do
+    m <- readDicomMetadata d
+    case m of
+        Left e -> throwM $ OtherImagetroveException $ "Could not read DICOM metadata from " ++ d ++ ": " ++ e
+        Right m' -> case (dicomPatientID m', dicomStudyDescription m', dicomSeriesNumber m', dicomSeriesDescription m') of
+                      (Just patientID, Just studyDesc, Just seriesNr, Just seriesDesc) -> return (patientID, studyDesc, seriesNr, seriesDesc)
+                      x -> throwM $ MetadataMissingException x
+
+getSeriesDir :: [(DicomFilePath, String)] -> IO String
+getSeriesDir [] = throwM $ EmptySeriesException "Got a series with no files in getSeriesDir."
+getSeriesDir ((d, _):_) = do
+    (patientID, studyDesc, seriesNr, seriesDesc) <- getBasicMetadata d
+    return $ tidyName $ patientID </> studyDesc </> (seriesDesc ++ seriesNr)
+
+tidyName = makeValid . map (toLower . fixWeirdChars)
+
+-- What others? I bet there are more.
+fixWeirdChars '-' = '_'
+fixWeirdChars '.' = '_'
+fixWeirdChars ':' = '_'
+fixWeirdChars c   = c
+
+genZipFileName :: [(DicomFilePath, String)] -> IO String
+genZipFileName [] = throwM $ EmptySeriesException "Got a series with no files in genZipFileName."
+genZipFileName ((d, _):_) = do
+    (patientID, studyDesc, seriesNr, seriesDesc) <- getBasicMetadata d
+    -- return $ (tidyName $ patientID ++ "_" ++ studyDesc ++ "_" ++ (seriesDesc ++ seriesNr)) ++ ".zip"
+    -- return $ (tidyName $ patientID ++ "_" ++ studyDesc ++ "_" ++ seriesDesc) ++ ".zip"
+    return $ patientID ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ "_DICOM.zip"
+
+-- cProcessStudy :: InstrumentConfig -> MVars -> DC.Sink (String, [Series]) MyTardisIO ()
+-- cProcessStudy studyDirName iconfig mvars = CL.mapM_ foo
+--   where
+--     foo listOfSeries = do conf <- ask
+--                          -- forM_ listOfSeries $ \df -> liftIO $ (runReaderT (processSeries df) conf) `catchAll` (\e -> do putStrLn $ "Exception: " ++ show (e :: SomeException))
+--                          let tasks = map (\df -> (runReaderT (processSeries df) conf) `catchAll` (\e -> do putStrLn $ "Exception: " ++ show (e :: SomeException))) listOfSeries
+--                          liftIO $ withPool nrWorkersGlobal $ \pool -> parallel pool tasks
+--                          return ()
+
+processSeries :: InstrumentConfig -> MVars -> DCMTKSeries -> MyTardisIO ()
+processSeries iconfig mvars dcmtkSeries = do
+    let (studyDir, studyDirName, studyLastUpdate, series) = dcmtkSeries
+        
+    let dfiles = series
+
+    liftIO $ putStrLn $ "processSeries: got series of " ++ show (length dfiles) ++ " files."
+
+    let MVars acidMVar experimentMVar datasetMVar groupMVar = mvars
+    -- h <- liftIO $ getStudyDirName $ map fst dfiles
+    -- liftIO $ putStrLn $ "Series has " ++ (show $ length dfiles) ++ " files with hashes: " ++ show h
+
+    let f = fst <$> headMay dfiles
+    m <- liftIO $ traverse readDicomMetadata f
+
+    case m of
+        Nothing       -> liftIO $ putStrLn "Error: no files in series."
+        Just (Left e) -> do liftIO $ putStrLn $ "Error: Could not read DICOM metadata: " ++ e
+                            liftIO $ putStrLn $ "Error: could not read DICOM metadata: " ++ e ++ " from file: " ++ show f
+
+        Just (Right m') -> do let projectID = caiProjectID [m']
+                              liftIO $ putStrLn $ "Found project ID: " ++ show projectID
+
+                              projectGroup <- _createProjectGroup groupMVar projectID
+                              case projectGroup of
+                                A.Error e -> liftIO $ putStrLn $ "Could not create project group " ++ show projectID ++ " due to error: " ++ e
+                                A.Success _ -> do liftIO $ putStrLn $ "Created project group: " ++ show projectID
+
+                                                  -- Create resources (temp directories, etc) for the actual
+                                                  -- processing of the series. This is not done in a tidy way,
+                                                  -- dirs won't be removed if an exception occurs.
+                                                  tmp <- mytardisTmp <$> ask
+                                                  tempDir <- liftIO $ createTempDirectory tmp "dcmtk_conversion"
+
+                                                  seriesDirName <- liftIO $ (tempDir </>) <$> (getSeriesDir dfiles)
+                                                  liftIO $ createDirectoryIfMissing True seriesDirName
+
+                                                  let resources = Resources tempDir seriesDirName
+
+                                                  (finishSeries mvars iconfig resources dcmtkSeries) `finally` (liftIO $ removeRecursiveSafely tempDir)
+
+                                                  liftIO $ print ()
+
+copyDicoms :: [FilePath] -> FilePath -> IO [FilePath]
+copyDicoms dfiles targetDir = do
+    forM_ (zip dfiles targetFiles) (\(old, new) -> do when (old == new) (error $ "Trying to copy file to itself: " ++ old)
+                                                      putStrLn $ old ++ " ==> " ++ new
+                                                      copyFile old new)
+    return targetFiles
+  where
+    targetFiles  = map (\f -> targetDir </> (takeFileName f)) dfiles
+
+makeTemp :: String -> MyTardisIO (Either String FilePath)
+makeTemp desc = do
+    tmp <- mytardisTmp <$> ask
+
+    catch (liftIO $ Right <$> (createTempDirectory tmp desc))
+          (\e -> return $ Left $ show (e :: IOException))
+
+finishSeries :: MVars -> InstrumentConfig -> Resources -> DCMTKSeries -> ReaderT MyTardisConfig IO ()
+finishSeries mvars iconfig resources dcmtkSeries = do
+    let (studyDir, studyDirName, studyLastUpdate, series) = dcmtkSeries
+        dfiles    = map fst series
+        _dfiles   = series
+
+        tempDir   = resourceTemp resources
+        seriesDir = resourceSeriesDir resources
+
+    let MVars acidMVar experimentMVar datasetMVar groupMVar = mvars
+
+    let (instrumentName,
+         instrumentFilters,
+         instrumentFiltersT,
+         instrumentMetadataFields,
+         experimentFields,
+         datasetFields,
+         schemaExperiment,
+         schemaDataset,
+         schemaFile,
+         defaultInstitutionName,
+         defaultInstitutionalDepartmentName,
+         defaultInstitutionalAddress,
+         defaultOperators) = iconfig
+
+    let fp = undefined :: String -- FIXME Pass this through?
+
+    -- OK, we have created the project group, so now we need to do the various stages...
+    --
+    -- stage 1: make copies
+    copiedDicomFiles <- liftIO $ copyDicoms dfiles seriesDir
+
+    _dicomMetadata <- liftIO $ forM copiedDicomFiles readDicomMetadata
+    when (lefts _dicomMetadata /= []) $ throwM $ OtherImagetroveException $ "Could not read DICOM metadata: " ++ show (lefts _dicomMetadata)
+    let dicomMetadata = rights _dicomMetadata
+
+    -- stage 2: anonymize
+    liftIO $ withPool nrWorkersGlobal $ \pool -> parallel pool (map anonymizeDicomFile' copiedDicomFiles)
+    anonymizedDicomFiles <- liftIO $ getDicomFilesInDirectory ".IMA" seriesDir
+
+    -- stage 3: make zip of dicom
+    zipFileName <- liftIO $ genZipFileName _dfiles
+    _patientDir  <- liftIO $ (map $ last . splitPath) <$> (getDirs' tempDir)
+
+    when (length _patientDir /= 1) (error $ "Found multiple patient directories in " ++ tempDir ++ " ==> " ++ show _patientDir)
+    let [patientDir] = _patientDir
+
+    liftIO $ putStrLn $ "Running: " ++ show (tempDir, "zip", ["-r", zipFileName, patientDir])
+    _ <- liftIO $ _runShellCommand tempDir "zip" ["-r", zipFileName, patientDir]
+
+    let zipFileFullName = tempDir </> zipFileName
+
+    -- stage 4: make minc
+    _mincFiles <- liftIO $ dicomToMinc tempDir dfiles -- IO (Either String (FilePath, [FilePath])) -- FIXME stupid pattern match
+
+    mincFiles <- case _mincFiles of
+                    Left e -> throwM $ OtherImagetroveException e
+                    Right _mincFiles' -> return _mincFiles'
+
+    -- stage 4a: rename minc files
+    renamedMincFiles <- liftIO $ ___renameMinc dfiles mincFiles
+
+    -- stage 4a(i): MINC to MINC2
+    tmp <- mytardisTmp <$> ask
+    toMinc2Results <- liftIO $ forM renamedMincFiles (mncToMnc2 tmp) -- FIXME check results
+
+    -- stage 4b: minc thumbnails
+    mincThumbnails <- liftIO $ forM renamedMincFiles createMincThumbnail
+    
+    -- stage 5: make nifti
+    niftis <- liftIO $ forM renamedMincFiles createNifti
+
+    let files = renamedMincFiles
+
+    -- stage 6: make experiment/dataset
+    schemas <- createSchemasIfMissing (schemaExperiment, schemaDataset, schemaFile)
+
+    let ie = identifyExperiment schemaExperiment
+                                defaultInstitutionName
+                                defaultInstitutionalDepartmentName
+                                defaultInstitutionalAddress
+                                defaultOperators
+                                experimentFields
+                                instrumentMetadataFields
+                                dicomMetadata
+
+    e <- eitherToResult <$> traverse (callWorker experimentMVar) ie :: ReaderT MyTardisConfig IO (Result RestExperiment)
+
+    let ids = resultMaybeToResult ((\e -> identifyDataset schemaDataset datasetFields e dicomMetadata) <$> e) :: Result IdentifiedDataset
+
+    d <- squashResults <$> traverse (callWorker datasetMVar) ids :: ReaderT MyTardisConfig IO (Result RestDataset)
+
+    let oneFile = headMay dicomMetadata
+        Just pid        = join (dicomPatientID         <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        Just studyDesc  = join (dicomStudyDescription  <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        Just seriesDesc = join (dicomSeriesDescription <$> oneFile) -- FIXME dangerous pattern match, should be an error
+        seriesNr        = fromMaybe "(series)" $ join (dicomSeriesNumber <$> oneFile)
+        filemetadata = (\f -> [(schemaFile, M.fromList
+                                                [ ("PatientID",         fromMaybe "(PatientID missing)"         $ dicomPatientID         f)
+                                                -- , ("StudyInstanceUID",  fromMaybe "(StudyInstanceUID missing)"  $ dicomStudyInstanceUID  f)
+                                                -- , ("SeriesInstanceUID", fromMaybe "(SeriesInstanceUID missing)" $ dicomSeriesInstanceUID f)
+                                                , ("StudyDescription",  fromMaybe "(StudyDescription missing)"  $ dicomStudyDescription  f)
+                                                ]
+                               )
+                              ]) <$> oneFile
+
+    -- stage 7: push files
+    case (e, d, filemetadata) of
+        (A.Success e', A.Success d', Just filemetadata') -> do let push = pushFile schemaFile identifyDatasetFile d' filemetadata'
+                                                               -- Zip of DICOM files:
+                                                               push zipFileFullName
+
+                                                               -- MINC files:
+                                                               forM_ renamedMincFiles push
+
+                                                               -- MINC thumbnails:
+                                                               forM_ (rights mincThumbnails) push
+
+                                                               -- Nifti files:
+                                                               forM_ (rights niftis) push
+
+                                                               -- FIXME produce warnings about lefts of mincThumbnails and niftis
+
+                                                               liftIO $ do callWorkerIO acidMVar (AcidUpdateMap fp (studyDirName, seriesDesc) studyLastUpdate)
+                                                                           putStrLn $ "Updated last update."
+
+                                                               liftIO $ print "done" 
+        
+        (A.Error expError, _, _)            -> throwM $ OtherImagetroveException $ "Error when creating experiment: " ++ expError
+        (A.Success _, A.Error dsError, _)   -> throwM $ OtherImagetroveException $ "Error when creating dataset: " ++ dsError
+        (A.Success _, A.Success _, Nothing) -> throwM $ OtherImagetroveException $ "Error when creating extracting file metadata. No files in DICOM group!"
+
+    liftIO $ print "finishSeries: done."
+
+pushFile schemaFile identifyDatasetFile d filemetadata f = do
+    dsf <- uploadFileBasic schemaFile identifyDatasetFile d f filemetadata
+
+    case dsf of
+        A.Error e   -> throwM $ OtherImagetroveException $ "Could not upload file: " ++ e
+        A.Success _ -> return ()
+
+___renameMinc dfiles (tempDir, _mincFiles) = do
+    m@(pid, studyDesc, seriesNr, seriesDesc) <- getBasicMetadata (head dfiles)
+    putStrLn $ "___renameMinc: metadata: " ++ show m
+
+    -- let renamer pid studyDesc seriesNr seriesDesc f = base </> (pid ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ "_" ++ seriesNr ++ "_" ++ f')
+    let renamer pid studyDesc seriesNr seriesDesc f = base </> (pid ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ f')
+           where base = dropFileName f
+                 (originalMincFile:dirName:_) = reverse $ splitPath f
+                 f' = drop (length dirName - 1) originalMincFile
+
+    let myRenamer = renamer pid studyDesc seriesNr seriesDesc
+
+    liftIO $ forM_ _mincFiles $ \f -> do let old = f
+                                             new = myRenamer old
+                                         putStrLn $ "Renaming <" ++ old ++ "> to <" ++ new ++ ">"
+                                         rename old new
+    return $ map myRenamer _mincFiles
+
+-- runConduit :: InstrumentConfig -> FilePath -> MyTardisIO ()
+runConduit iconfig topDir = do
+    conf <- ask
+
+    acidMVar       <- liftIO $ newEmptyMVar
+    experimentMVar <- liftIO $ newEmptyMVar
+    datasetMVar    <- liftIO $ newEmptyMVar
+    groupMVar      <- liftIO $ newEmptyMVar
+
+    let mvars = MVars acidMVar experimentMVar datasetMVar groupMVar
+
+    asyncAcidWorker             <- liftIO $ async $ acidWorker acidMVar
+    asyncWorkerCreateExperiment <- liftIO $ async $ runReaderT (workerCreateExperiment experimentMVar) conf
+    asyncWorkerCreateDataset    <- liftIO $ async $ runReaderT (workerCreateDataset    datasetMVar)    conf
+    asyncWorkerCreateGroup      <- liftIO $ async $ runReaderT (workerCreateGroup      groupMVar)      conf
+
+    liftIO $ putStrLn $ "Running conduit..."
+
+    -- FIXME should use iconfig to filter out our instrument here!!!
+    -- (studyDirs topDir) DC.$$ studyFiles DC.=$= cGroupBySeries DC.=$= (cProcessStudy iconfig mvars)
+
+    s  <- liftIO $ (take 3) <$> (studyDirs topDir)
+    sf <- liftIO $ mapM studyFiles s
+
+    -- liftIO $ forM_ sf $ \(studyDir, studyDirName, studyLastUpdate, series) -> forM_ series $ \s -> print (studyDirName, s)
+
+    -- Break apart into series
+    let series = concat $ map _groupBySeries sf
+
+    liftIO $ print $ length s
+    liftIO $ print $ length sf
+    liftIO $ print $ length series
+
+    let seriesTasks = map (\s -> runReaderT (processSeries iconfig mvars s) conf) series
+
+    liftIO $ withPool nrWorkersGlobal $ \pool -> parallelE_ pool seriesTasks
+
+    pollExperiment <- liftIO $ poll asyncWorkerCreateExperiment
+    pollDataset    <- liftIO $ poll asyncWorkerCreateDataset
+    pollGroup      <- liftIO $ poll asyncWorkerCreateGroup
+    pollAcid       <- liftIO $ poll asyncAcidWorker
+
+    liftIO $ putStrLn $ "poll pollExperiment: " ++ show pollExperiment
+    liftIO $ putStrLn $ "poll pollDataset: " ++ show pollDataset
+    liftIO $ putStrLn $ "poll pollGroup: " ++ show (pollGroup :: Maybe (Either SomeException ()))
+    liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
+
+    liftIO $ print "runConduit: exiting"
+
+
+-- imageTroveMain :: IO ()
+-- imageTroveMain = runConduit "/export/nif02/imagetrove/production/dcmtk-store-transfer/"
+-- imageTroveMain = runConduit "/home/carlo/Desktop/dcmtk_tmp/"
+-- imageTroveMain = undefined
+
+
+
+
+{-
+
+
+http://stackoverflow.com/questions/23922855/how-can-i-get-a-value-after-running-a-conduit/23925496#23925496
+
+    "This is a limitation of the primary conduit API: you're not able to
+    get the result value from anything but the most downstream component."
+
+-}
+
+
+data Resources = Resources {
+    resourceTemp        :: FilePath     -- For processing a single series, a top level temp directory.
+  , resourceSeriesDir   :: FilePath     -- Nicely named directory for DICOM series files; lives in 'resourceCopyTemp'
+} deriving (Show)
+
+
+
+
+
+

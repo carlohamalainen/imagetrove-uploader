@@ -159,39 +159,9 @@ readInstrumentConfig cfg instrumentName = do
         ( topLevelDirectory', processedDirectory', Just defaultOperators' , Just defaultInstitutionName' , Just defaultInstitutionalDepartmentName' , Just defaultInstitutionalAddress' , Just schemaExperiment' , Just schemaDataset' , Just schemaFile') -> return (topLevelDirectory', subdirectory, processedDirectory', defaultOperators', defaultInstitutionName', defaultInstitutionalDepartmentName', defaultInstitutionalAddress', schemaExperiment', schemaDataset', schemaFile', tempDirectory)
         _ -> error "Error: unhandled case in readInstrumentConfig. Report this bug."
 
--- | Is this a directory?
-isDir :: FilePath -> IO Bool
-isDir dir = isDirectory <$> getFileStatus dir
-
--- | Get the contents of a directory.
-getStuff :: FilePath -> IO (Either String [FilePath])
-getStuff dir = catch (Right . map (dir </>) . filter (not . (`elem` [".", ".."])) <$> getDirectoryContents dir)
-                     (\e -> return $ Left $ show (e :: IOException))
-
--- | Get directories in the directory.
-getDirs :: FilePath -> IO (Either String [FilePath])
-getDirs dir = do
-    stuff <- getStuff dir
-    case stuff of Right stuffs -> filterM isDir stuffs >>= (return . Right)
-                  Left err     -> return $ Left err
-
 -- | Test if an *absolute* path is the top level of a Bruker experiment directory.
 isBrukerDirectory :: FilePath -> IO Bool
 isBrukerDirectory dir = fileExist (dir </> "subject")
-
--- | A directory is considered stable if it hasn't been accessed or modified
--- for at least 5 minutes.
-isStable :: FilePath -> IO (Either String Bool)
-isStable dir = catch (Right <$> isStable' dir)
-                     (\e -> return $ Left $ show (e :: IOException))
-  where
-    isStable' dir = do
-        now        <- getCurrentTime
-        lastChange <- getLastChangedTime dir
-
-        let diff = diffUTCTime now lastChange
-
-        return $ diff > (5*60)
 
 identifyBrukerExperiment :: String -> String -> String -> String -> [String] -> FilePath -> IO (Either String IdentifiedExperiment)
 identifyBrukerExperiment schemaExperiment institution institutionalDepartmentName institutionAddress operators dir = do
@@ -216,17 +186,6 @@ identifyBrukerExperiment schemaExperiment institution institutionalDepartmentNam
   where
     desc            = "" -- FIXME What should this be?
     -- title           = last $ splitDirectories dir
-
-getLastChangedTime :: FilePath -> IO UTCTime
-getLastChangedTime x = do
-    stat <- getFileStatus x
-
-    let ctimeToUTC = \t -> posixSecondsToUTCTime (realToFrac t :: POSIXTime)
-
-    let atime = ctimeToUTC $ accessTime       stat
-        mtime = ctimeToUTC $ modificationTime stat
-
-    return $ max atime mtime
 
 tarBrukerDirectory :: FilePath -> FilePath -> IO (Either String FilePath)
 tarBrukerDirectory tempDir dir = do
@@ -422,11 +381,6 @@ stage7 schemaFile files ds' = do
     return $ case fileResults of
         Right fileResults' -> Right $ fileResults'
         Left  fileErrors   -> Left  $ BrukerCreateFilesError fileErrors
-
-joinEither :: Either a (Either a b) -> Either a b
-joinEither (Left a)          = Left a
-joinEither (Right (Right b)) = Right b
-joinEither (Right (Left  a)) = Left a
 
 removeRecursively :: FilePath -> IO (Either String FilePath)
 removeRecursively dir = catch (removeRecursiveSafely dir >> return (Right dir))
