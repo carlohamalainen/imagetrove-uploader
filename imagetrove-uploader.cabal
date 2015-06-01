@@ -87,6 +87,7 @@ library
                      , async
                      , exceptions
                      , conduit
+                     , random
 
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -155,6 +156,7 @@ executable imagetrove-dicom-uploader
                      , async
                      , exceptions
                      , conduit
+                     , random
 
 executable imagetrove-bruker-uploader
   main-is:           MainBruker.hs
@@ -219,3 +221,4 @@ executable imagetrove-bruker-uploader
                      , async
                      , exceptions
                      , conduit
+                     , random

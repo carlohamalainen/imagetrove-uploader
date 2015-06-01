@@ -1,9 +1,10 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- module Network.ImageTrove.Acid (getLastRunTime, setLastRunTime) where
-module Network.ImageTrove.Acid (acidWorker, callWorkerIO, AcidAction(..), AcidOutput(..)) where
+module Network.ImageTrove.Acid (acidWorker, callWorkerIO, AcidAction(..), AcidOutput(..), loadMap, Key(..)) where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -15,10 +16,14 @@ import Data.Typeable
 import Control.Concurrent
 import Control.Concurrent.STM
 
+import System.Random (randomIO)
+
 import qualified Data.Map as Map
 
-import Control.Exception (onException)
+-- import Control.Exception (onException)
 import Control.Concurrent (threadDelay)
+
+import Control.Monad.Catch
 
 -- Key/Value example copied from acid-state example: https://github.com/acid-state/acid-state/blob/master/examples/KeyValue.hs
 
@@ -53,7 +58,11 @@ $(makeAcidic ''KeyValue ['insertKey, 'deleteKey, 'lookupKey, 'getMapInternal])
 
 loadMap :: FilePath -> IO (Map.Map Key Value)
 loadMap fp = do
-    loadMap' fp `onException` (print "error: exception in loadMap!" >> threadDelay (1 * 10^6) >> loadMap fp)
+    catchAll (loadMap' fp)
+             (\(e :: SomeException) -> do print $ "error: exception in loadMap! " ++ show e
+                                          r <- randomIO :: IO Float
+                                          threadDelay $ ceiling $ ((0.1 + 5*r) * 10^6)
+                                          loadMap fp)
   where
     loadMap' fp = do
         acid <- openLocalStateFrom fp (KeyValue Map.empty)
@@ -63,7 +72,11 @@ loadMap fp = do
 
 updateLastUpdate :: FilePath -> Key -> ZonedTime -> IO ()
 updateLastUpdate fp x lastUpdate = do
-    updateLastUpdate' fp x lastUpdate `onException` (print "error: exception in updateLastUpdate!" >> threadDelay (1 * 10^6) >> updateLastUpdate fp x lastUpdate)
+    catchAll (updateLastUpdate' fp x lastUpdate)
+             (\(e :: SomeException) -> do print $ "error: exception in updateLastUpdate! " ++ show e
+                                          r <- randomIO :: IO Float
+                                          threadDelay $ ceiling $ ((0.1 + 5*r) * 10^6)
+                                          updateLastUpdate fp x lastUpdate)
   where
     updateLastUpdate' fp x lastUpdate = do
         acid <- openLocalStateFrom fp (KeyValue Map.empty)
@@ -72,7 +85,11 @@ updateLastUpdate fp x lastUpdate = do
 
 deleteLastUpdate :: FilePath -> Key -> IO ()
 deleteLastUpdate fp x = do
-    deleteLastUpdate' fp x `onException` (print "error: exception in deleteLastUpdate!" >> threadDelay (1 * 10^6) >> deleteLastUpdate fp x)
+    catchAll (deleteLastUpdate' fp x)
+             (\(e :: SomeException) -> do print $ "error: exception in deleteLastUpdate! " ++ show e
+                                          r <- randomIO :: IO Float
+                                          threadDelay $ ceiling $ ((0.1 + 5*r) * 10^6)
+                                          deleteLastUpdate fp x)
   where
     deleteLastUpdate' fp x = do
         acid <- openLocalStateFrom fp (KeyValue Map.empty)
@@ -88,6 +105,9 @@ data AcidOutput = AcidMap (Map.Map Key Value)
                 deriving Show
 
 acidWorker m = forever $ do
+    r <- randomIO :: IO Float
+    threadDelay $ ceiling $ ((0.1 + 5*r) * 10^6)
+
     (action, o) <- takeMVar m
 
     case action of

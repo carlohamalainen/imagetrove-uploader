@@ -164,42 +164,6 @@ uploadAllAction opts = do
 
     forM_ instrumentConfigs $ \(instrumentName, instrumentFilters, instrumentFiltersT, instrumentMetadataFields, experimentFields, datasetFields, schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators) -> uploadDicomAsMinc instrumentFilters instrumentMetadataFields experimentFields datasetFields identifyExperiment identifyDataset identifyDatasetFile (getDicomDir opts) (schemaExperiment, schemaDataset, schemaDicomFile, defaultInstitutionName, defaultInstitutionalDepartmentName, defaultInstitutionalAddress, defaultOperators)
 
--- | Orthanc returns the date/time but has no timezone so append tz here:
--- getPatientLastUpdate :: TimeZone -> OrthancPatient -> Maybe ZonedTime
--- getPatientLastUpdate tz p = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (opLastUpdate p ++ " " ++ show tz)
-
-{-
-
-
--- | Orthanc returns the date/time but has no timezone so append tz here:
-getSeriesLastUpdate :: TimeZone -> OrthancSeries -> Maybe ZonedTime
-getSeriesLastUpdate tz s = utcToZonedTime tz <$> parseTime defaultTimeLocale "%Y%m%dT%H%M%S %Z" (oseriesLastUpdate s ++ " " ++ show tz)
-
-getHashes :: (OrthancPatient, OrthancStudy, OrthancSeries) -> PatientStudySeries
-getHashes (patient, study, series) = (opID patient, ostudyID study, oseriesID series)
-
-patientsToProcess :: MVar (AcidAction, MVar AcidOutput)
-                  -> FilePath
-                  -> [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-                  -> [(PatientStudySeries, Maybe ZonedTime)]
-                  -> IO [(OrthancPatient, OrthancStudy, OrthancSeries, OrthancInstance, OrthancTags)]
-patientsToProcess acidMVar fp ogroups hashAndLastUpdated = do
-    -- m <- loadMap fp -- :: FilePath -> IO (M.Map String (Maybe ZonedTime))
-    AcidMap m <- callWorkerIO acidMVar (AcidLoadMap fp)
-
-    let blah = zip ogroups hashAndLastUpdated
-
-    return $ Prelude.map fst $ Prelude.filter (f m) blah
-
-  where
-    f m (_, (h, Just lu)) = case M.lookup h m of
-                                Nothing                 -> True -- hash is not in the map
-                                Just Nothing            -> True -- hash is in the map but no ZonedTime available (perhaps due to parse error from Orthanc's LastUpdate field?)
-                                Just (Just luPrevious)  -> zonedTimeToUTC luPrevious < zonedTimeToUTC lu  -- hash and LastUpdate in map, compare to see if current update time is newer.
-    f m (_, (h, Nothing)) = True
-
--}
-
 anonymizeDicomFile :: FilePath -> IO (Either String String)
 anonymizeDicomFile f = do
     patientID <- (fmap dicomPatientID) <$> (readDicomMetadata f)
@@ -549,117 +513,6 @@ showNewAction opts = do
     let fp = cwd </> (slashToUnderscore $ "state_" ++ optConfigFile opts)
     liftIO $ createDirectoryIfMissing True fp
 
-{-
-
-    instrumentConfigs <- liftIO $ readInstrumentConfigs (optConfigFile opts)
-
-    forM_ instrumentConfigs $ \( instrumentName
-                               , instrumentFilters
-                               , instrumentFiltersT
-                               , instrumentMetadataFields
-                               , experimentFields
-                               , datasetFields
-                               , schemaExperiment
-                               , schemaDataset
-                               , schemaDicomFile
-                               , defaultInstitutionName
-                               , defaultInstitutionalDepartmentName
-                               , defaultInstitutionalAddress
-                               , defaultOperators) -> do
-
-            liftIO $ putStrLn ""
-            liftIO $ putStrLn ""
-            liftIO $ putStrLn $ "Instrument: " ++ instrumentName
-            liftIO $ putStrLn ""
-
-            _ogroups <- getOrthancInstrumentGroups instrumentFiltersT <$> majorOrthancGroups
-
-            case _ogroups of Left err -> undefined
-                             Right ogroups -> do
-                                                 let -- Times that available *series* have been updated:
-                                                     updatedTimes = map (\(_, _, s, _, _) -> (getSeriesLastUpdate tz s)) ogroups :: [Maybe ZonedTime]
-
-                                                     -- Hash of each:
-                                                     hashes = map (\(patient, study, series, _, _) -> getHashes (patient, study, series)) ogroups
-
-                                                     -- Together:
-                                                     hashAndLastUpdated = zip hashes updatedTimes
-
-                                                 -- liftIO $ putStrLn $ "|hashAndLastUpdated| = " ++ show (length hashAndLastUpdated)
-
-                                                 acidMVar <- liftIO $ newEmptyMVar
-                                                 workerAcid <- liftIO $ forkIO $ acidWorker acidMVar
-
-                                                 recentOgroups <- liftIO $ patientsToProcess acidMVar fp ogroups hashAndLastUpdated
-
-                                                 {-
-                                                 let newPatients = S.toList $ S.fromList $ map (\(p, _, _, _, _) -> p) recentOgroups
-
-                                                 forM_ newPatients $ \p -> do
-                                                    let pname = M.lookup "PatientName" (opMainDicomTags p)
-                                                    liftIO $ putStrLn $ opID p ++ " " ++ show pname
-                                                 -}
-                                                 forM_ recentOgroups $ \(p, stud, ser, _, _) -> do
-                                                    let pname = M.lookup "PatientName" (opMainDicomTags p)
-                                                    liftIO $ print (pname, opID p, ostudyID stud, oseriesID ser)
--}
-
-
-
-
-{-
--- Single worker that talks to the database to create things.
-experimentWorker m = forever $ do
-    (x, o) <- takeMVar m
-    print $ "experimentWorker: got value: " ++ show x
-    threadDelay $ (1 * 10^6)
-
-    let x' = x + 1 :: Integer
-
-    print $ "experimentWorker: putting value " ++ show x' ++ " into output mvar."
-    putMVar o x'
-
-    return ()
-
--- Minion that does its own work but has to ask the experimentWorker
--- to do something for it.
-minion m mid x = do
-    putStrLn $ "I am minion " ++ mid ++ ". Asking experimentWorker to do something."
-
-    -- MVar for the value we want back.
-    result <- newEmptyMVar
-
-    -- Send our value x and our return value MVar to the global level MVar m.
-    putMVar m (x, result)
-
-    -- Wait for the result to come back.
-    result' <- takeMVar result
-
-    putStrLn $ "Minion " ++ mid ++ " finished, got result: " ++ show result'
-
-    return ()
-
-imageTroveMain :: IO ()
-imageTroveMain = do
-    -- Essentially a queue for the experimentWorker to read values from.
-    m <- newEmptyMVar
-
-    -- Fork it.
-    forkIO $ experimentWorker m
-
-    withPool 4 $ \pool -> parallel_ pool [ minion m "0" 0
-                                         , minion m "1" 1
-                                         , minion m "2" 2
-                                         , minion m "3" 3
-                                         , minion m "4" 4
-                                         , minion m "5" 5
-                                         , minion m "6" 6
-                                         , minion m "7" 7
-                                         ]
-
-    print "done"
--}
-
 __imageTroveMain :: IO ()
 __imageTroveMain = do
     opts' <- execParser opts
@@ -948,29 +801,6 @@ readInstrumentConfig cfg instrumentName = do
     toIdentifierTuple [field, value] = (field, value)
     toIdentifierTuple x = error $ "Error: toIdentifierTuple: too many items specified: " ++ show x
 
-
-processStudyDirectory :: MVars -> FilePath -> ReaderT MyTardisConfig IO [IO ()]
-processStudyDirectory mvars sdir = undefined
-{-
-processStudyDirectory mvars sdir = do
-    liftIO $ putStrLn $ "Processing study directory: " ++ sdir
-
-    allFiles <- liftIO $ getStudyFiles sdir
-    liftIO $ putStrLn $ "Found " ++ show (fmap length allFiles) ++ " dicom files."
-
-    series <- liftIO $ joinEither <$> traverse groupBySeries allFiles
-
-    case series of
-        Left err -> undefined
-        Right series' -> do conf <- ask
-                            let processSeriesIO dfiles = runReaderT (processSeries mvars dfiles) conf
-                            return $ map processSeriesIO series'
--}
-
---getStudyDirName :: [DicomFilePath] -> String
---getStudyDirName [] = throwM $ EmptySeriesException "No files in series in getStudyDirName."
---getStudyDirName (f:_) = (head . drop 1 . reverse . splitDirectories) f
-
 type StudyDirectory = FilePath
 
 data DFile = DFile {
@@ -980,18 +810,6 @@ data DFile = DFile {
 
 type DicomFilePath  = FilePath
 
-getStudyFiles :: StudyDirectory -> IO (Either String [DicomFilePath])
-getStudyFiles sdir = catch (Right <$> getDicomFilesInDirectory ".dcm" sdir)
-                           (\e -> return $ Left $ show (e :: IOException))
-    {-
-    dfiles <- forM files readDicomMetadata
-
-    case lefts dfiles of
-        [] -> return $ Right $ map (\(f, d) -> DFile f d) (zip files (rights dfiles))
-        l  -> do putStrLn $ "Error: could not read DICOM file(s) in " ++ sdir ++ ": " ++ show l
-                 return $ Left $ show l -- urgh, stringly typed error.
-    -}
-
 groupBySeries :: [DicomFilePath] -> IO (Either String [[DicomFilePath]])
 groupBySeries dfiles = do
     seriesUIDs <- withPool nrWorkersGlobal $ \pool -> parallel pool (Prelude.map readSeriesDesc dfiles)
@@ -1000,11 +818,6 @@ groupBySeries dfiles = do
         result = Prelude.map (fmap snd) [ Prelude.filter (\(uid, _) -> uid == suid) (zip seriesUIDs dfiles) | suid <- uniqueUIDs ] -- inefficient...?
     putStrLn $ "groupBySeries: found " ++ show (length result) ++ " different series in this study."
     return $ Right result
-
-squashResultMaybe :: A.Result (Maybe a) -> A.Result a
-squashResultMaybe (A.Success (Just x)) = A.Success x
-squashResultMaybe (A.Success Nothing)  = A.Error $ "Nothing"
-squashResultMaybe (A.Error   e)        = A.Error e
 
 copyToTempDir :: [DFile] -> ReaderT MyTardisConfig IO (A.Result FilePath)
 copyToTempDir dfiles = copyToTempDir' dfiles `catchIOError` (\e -> return $ A.Error $ show (e :: IOException))
@@ -1032,8 +845,7 @@ imageTroveMain = do
 
     case mytardisOpts of
         (Just mytardisOpts') -> do instrumentConfigs <- readInstrumentConfigs f -- FIXME use opts from cmdline parser (optConfigFile opts)
-                                   -- forM_ instrumentConfigs $ \iconfig -> runReaderT (runConduit iconfig "/export/nif02/imagetrove/test") mytardisOpts'
-                                   forM_ instrumentConfigs $ \iconfig -> runReaderT (runConduit iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
+                                   forM_ instrumentConfigs $ \iconfig -> runReaderT (runDCMTK f iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
         _                    -> error $ "Could not read config file: " ++ f
 
 
@@ -1057,16 +869,6 @@ studyFiles (sdir, dirname, mtime) = do
     putStrLn $ "studyFiles: found " ++ show (length files) ++ " files in " ++ sdir
 
     return $ (sdir, dirname, mtime, zip files suids)
-
--- FIXME How do we use conduit's groupBy????
--- groupBy :: Monad m => (a -> a -> Bool) -> Conduit a m [a]
-
---cGroupBySeries :: DC.Conduit [(DicomFilePath, String)] MyTardisIO (String, [Series])
---cGroupBySeries = CL.map $ \x -> (getStudyDirName (map fst x), map Series (cGroupedBySeries' x))
---  where
-
-cGroupedBySeries' :: [(DicomFilePath, String)] -> [[(DicomFilePath, String)]]
-cGroupedBySeries' ds = groupBy (\(_, s1) (_, s2) -> s1 == s2) ((sortBy . comparing) snd ds)
 
 type StudyDir = FilePath
 type StudyDirName = String
@@ -1118,19 +920,10 @@ genZipFileName ((d, _):_) = do
     -- return $ (tidyName $ patientID ++ "_" ++ studyDesc ++ "_" ++ seriesDesc) ++ ".zip"
     return $ patientID ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ "_DICOM.zip"
 
--- cProcessStudy :: InstrumentConfig -> MVars -> DC.Sink (String, [Series]) MyTardisIO ()
--- cProcessStudy studyDirName iconfig mvars = CL.mapM_ foo
---   where
---     foo listOfSeries = do conf <- ask
---                          -- forM_ listOfSeries $ \df -> liftIO $ (runReaderT (processSeries df) conf) `catchAll` (\e -> do putStrLn $ "Exception: " ++ show (e :: SomeException))
---                          let tasks = map (\df -> (runReaderT (processSeries df) conf) `catchAll` (\e -> do putStrLn $ "Exception: " ++ show (e :: SomeException))) listOfSeries
---                          liftIO $ withPool nrWorkersGlobal $ \pool -> parallel pool tasks
---                          return ()
-
-processSeries :: InstrumentConfig -> MVars -> DCMTKSeries -> MyTardisIO ()
-processSeries iconfig mvars dcmtkSeries = do
+processSeries :: String -> InstrumentConfig -> MVars -> DCMTKSeries -> MyTardisIO ()
+processSeries acidDir iconfig mvars dcmtkSeries = do
     let (studyDir, studyDirName, studyLastUpdate, series) = dcmtkSeries
-        
+
     let dfiles = series
 
     liftIO $ putStrLn $ "processSeries: got series of " ++ show (length dfiles) ++ " files."
@@ -1166,7 +959,7 @@ processSeries iconfig mvars dcmtkSeries = do
 
                                                   let resources = Resources tempDir seriesDirName
 
-                                                  (finishSeries mvars iconfig resources dcmtkSeries) `finally` (liftIO $ removeRecursiveSafely tempDir)
+                                                  (finishSeries acidDir mvars iconfig resources dcmtkSeries) `finally` (liftIO $ removeRecursiveSafely tempDir)
 
                                                   liftIO $ print ()
 
@@ -1186,8 +979,8 @@ makeTemp desc = do
     catch (liftIO $ Right <$> (createTempDirectory tmp desc))
           (\e -> return $ Left $ show (e :: IOException))
 
-finishSeries :: MVars -> InstrumentConfig -> Resources -> DCMTKSeries -> ReaderT MyTardisConfig IO ()
-finishSeries mvars iconfig resources dcmtkSeries = do
+finishSeries :: String -> MVars -> InstrumentConfig -> Resources -> DCMTKSeries -> ReaderT MyTardisConfig IO ()
+finishSeries acidDir mvars iconfig resources dcmtkSeries = do
     let (studyDir, studyDirName, studyLastUpdate, series) = dcmtkSeries
         dfiles    = map fst series
         _dfiles   = series
@@ -1210,8 +1003,6 @@ finishSeries mvars iconfig resources dcmtkSeries = do
          defaultInstitutionalDepartmentName,
          defaultInstitutionalAddress,
          defaultOperators) = iconfig
-
-    let fp = undefined :: String -- FIXME Pass this through?
 
     -- OK, we have created the project group, so now we need to do the various stages...
     --
@@ -1246,7 +1037,7 @@ finishSeries mvars iconfig resources dcmtkSeries = do
                     Right _mincFiles' -> return _mincFiles'
 
     -- stage 4a: rename minc files
-    renamedMincFiles <- liftIO $ ___renameMinc dfiles mincFiles
+    renamedMincFiles <- liftIO $ renameMinc dfiles mincFiles
 
     -- stage 4a(i): MINC to MINC2
     tmp <- mytardisTmp <$> ask
@@ -1254,7 +1045,7 @@ finishSeries mvars iconfig resources dcmtkSeries = do
 
     -- stage 4b: minc thumbnails
     mincThumbnails <- liftIO $ forM renamedMincFiles createMincThumbnail
-    
+
     -- stage 5: make nifti
     niftis <- liftIO $ forM renamedMincFiles createNifti
 
@@ -1309,11 +1100,11 @@ finishSeries mvars iconfig resources dcmtkSeries = do
 
                                                                -- FIXME produce warnings about lefts of mincThumbnails and niftis
 
-                                                               liftIO $ do callWorkerIO acidMVar (AcidUpdateMap fp (studyDirName, seriesDesc) studyLastUpdate)
+                                                               liftIO $ do callWorkerIO acidMVar (AcidUpdateMap acidDir (studyDirName, seriesDesc) studyLastUpdate)
                                                                            putStrLn $ "Updated last update."
 
-                                                               liftIO $ print "done" 
-        
+                                                               liftIO $ print "done"
+
         (A.Error expError, _, _)            -> throwM $ OtherImagetroveException $ "Error when creating experiment: " ++ expError
         (A.Success _, A.Error dsError, _)   -> throwM $ OtherImagetroveException $ "Error when creating dataset: " ++ dsError
         (A.Success _, A.Success _, Nothing) -> throwM $ OtherImagetroveException $ "Error when creating extracting file metadata. No files in DICOM group!"
@@ -1327,9 +1118,9 @@ pushFile schemaFile identifyDatasetFile d filemetadata f = do
         A.Error e   -> throwM $ OtherImagetroveException $ "Could not upload file: " ++ e
         A.Success _ -> return ()
 
-___renameMinc dfiles (tempDir, _mincFiles) = do
+renameMinc dfiles (tempDir, _mincFiles) = do
     m@(pid, studyDesc, seriesNr, seriesDesc) <- getBasicMetadata (head dfiles)
-    putStrLn $ "___renameMinc: metadata: " ++ show m
+    putStrLn $ "renameMinc: metadata: " ++ show m
 
     -- let renamer pid studyDesc seriesNr seriesDesc f = base </> (pid ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ "_" ++ seriesNr ++ "_" ++ f')
     let renamer pid studyDesc seriesNr seriesDesc f = base </> (pid ++ "_" ++ studyDesc ++ "_" ++ seriesDesc ++ f')
@@ -1345,9 +1136,34 @@ ___renameMinc dfiles (tempDir, _mincFiles) = do
                                          rename old new
     return $ map myRenamer _mincFiles
 
--- runConduit :: InstrumentConfig -> FilePath -> MyTardisIO ()
-runConduit iconfig topDir = do
+seriesToProcess :: MVar (AcidAction, MVar AcidOutput)
+                -> FilePath
+                -> [DCMTKSeries]
+                -> IO [DCMTKSeries]
+seriesToProcess acidMVar fp series = do
+    AcidMap m <- callWorkerIO acidMVar (AcidLoadMap fp)
+
+    filterM (f m) series
+
+  where
+    f m (_, studyDirName, studyLastUpdate, [])                  = throwM $ OtherImagetroveException $ "Empty series in seriesToProcess."
+    f m (_, studyDirName, studyLastUpdate, ((_, seriesDesc):_)) = return $ case M.lookup (studyDirName, seriesDesc) m of
+                                                                    Nothing         -> True -- Haven't seen this before so we must process it.
+                                                                    Just luPrevious -> zonedTimeToUTC luPrevious < zonedTimeToUTC studyLastUpdate -- Check if current update time is newer.
+
+runDCMTK configFileName iconfig topDir = do
+    liftIO $ hSetBuffering stdout LineBuffering
+
     conf <- ask
+
+    cwd <- liftIO getCurrentDirectory
+
+    let slashToUnderscore = map (\c -> if c == '/' then '_' else c)
+        fp = cwd </> (slashToUnderscore $ "state_" ++ configFileName)
+
+    liftIO $ createDirectoryIfMissing True fp
+
+    currentMap <- liftIO $ loadMap fp
 
     acidMVar       <- liftIO $ newEmptyMVar
     experimentMVar <- liftIO $ newEmptyMVar
@@ -1361,24 +1177,27 @@ runConduit iconfig topDir = do
     asyncWorkerCreateDataset    <- liftIO $ async $ runReaderT (workerCreateDataset    datasetMVar)    conf
     asyncWorkerCreateGroup      <- liftIO $ async $ runReaderT (workerCreateGroup      groupMVar)      conf
 
-    liftIO $ putStrLn $ "Running conduit..."
+    liftIO $ putStrLn $ "runDCMTK..."
 
-    -- FIXME should use iconfig to filter out our instrument here!!!
-    -- (studyDirs topDir) DC.$$ studyFiles DC.=$= cGroupBySeries DC.=$= (cProcessStudy iconfig mvars)
-
-    s  <- liftIO $ (take 3) <$> (studyDirs topDir)
-    sf <- liftIO $ mapM studyFiles s
-
-    -- liftIO $ forM_ sf $ \(studyDir, studyDirName, studyLastUpdate, series) -> forM_ series $ \s -> print (studyDirName, s)
+    s  <- liftIO $ studyDirs topDir
+    -- sf <- liftIO $ mapM studyFiles s
+    sf <- liftIO $ withPool 10 $ \pool -> parallel pool (map studyFiles s)
 
     -- Break apart into series
     let series = concat $ map _groupBySeries sf
 
+    -- Only keep series that are not in the current map
+    -- or the timestamp in the map is older than what
+    -- we just saw (so a directory has been updated).
+
+    series' <- liftIO $ seriesToProcess acidMVar fp series
+
     liftIO $ print $ length s
     liftIO $ print $ length sf
     liftIO $ print $ length series
+    liftIO $ print $ length series'
 
-    let seriesTasks = map (\s -> runReaderT (processSeries iconfig mvars s) conf) series
+    let seriesTasks = map (\s -> runReaderT (processSeries fp iconfig mvars s) conf) series'
 
     liftIO $ withPool nrWorkersGlobal $ \pool -> parallelE_ pool seriesTasks
 
@@ -1392,35 +1211,10 @@ runConduit iconfig topDir = do
     liftIO $ putStrLn $ "poll pollGroup: " ++ show (pollGroup :: Maybe (Either SomeException ()))
     liftIO $ putStrLn $ "poll pollAcid: " ++ show (pollAcid :: Maybe (Either SomeException ()))
 
-    liftIO $ print "runConduit: exiting"
-
-
--- imageTroveMain :: IO ()
--- imageTroveMain = runConduit "/export/nif02/imagetrove/production/dcmtk-store-transfer/"
--- imageTroveMain = runConduit "/home/carlo/Desktop/dcmtk_tmp/"
--- imageTroveMain = undefined
-
-
-
-
-{-
-
-
-http://stackoverflow.com/questions/23922855/how-can-i-get-a-value-after-running-a-conduit/23925496#23925496
-
-    "This is a limitation of the primary conduit API: you're not able to
-    get the result value from anything but the most downstream component."
-
--}
-
+    liftIO $ print "runDCMTK: exiting"
 
 data Resources = Resources {
     resourceTemp        :: FilePath     -- For processing a single series, a top level temp directory.
   , resourceSeriesDir   :: FilePath     -- Nicely named directory for DICOM series files; lives in 'resourceCopyTemp'
 } deriving (Show)
-
-
-
-
-
 
