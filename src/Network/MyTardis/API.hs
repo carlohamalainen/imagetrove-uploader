@@ -73,6 +73,7 @@ data MyTardisConfig = MyTardisConfig
     , mytardisDir        :: String -- ^ Path to MyTARDIS storage directory, e.g. \"/imagetrove\"
     , mytardisDebug      :: Bool   -- ^ If set to "True" then dicom conversion directories are not removed.
     , mytardisTmp        :: FilePath -- ^ Directory for temporary files. Defaults to \"/tmp\".
+    , mytardisApiPrefix  :: String -- ^ Prefix for API URLs, e.g. use \"imagetrove_\" to get \"/imagetrove_experiment\" instead of \"/experiment\".
     }
     deriving Show
 
@@ -84,8 +85,9 @@ defaultMyTardisOptions :: String -- ^ MyTARDIS host URL.
                        -> String -- ^ MyTARDIS storage directory.
                        -> Bool   -- ^ Debug mode.
                        -> FilePath -- ^ Temporary directory.
+                       -> String -- ^ API URL prefix.
                        -> MyTardisConfig
-defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp = MyTardisConfig host "/api/v1" user pass opts Nothing orthHost mytardisDir debug tmp
+defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp apiPrefix = MyTardisConfig host "/api/v1" user pass opts Nothing orthHost mytardisDir debug tmp apiPrefix
   where
     opts = if "https" `isPrefixOf` host then optsHTTPS else optsHTTP
     optsHTTP  = defaults & manager .~ Left (defaultManagerSettings { managerResponseTimeout = Just 3000000000 } )
@@ -100,14 +102,14 @@ defaultMyTardisOptions host user pass orthHost mytardisDir debug tmp = MyTardisC
 -- | Wrapper around postWithE that uses our settings in a 'ReaderT'.
 postWith' :: String -> Value -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 postWith' x v = do
-    MyTardisConfig host apiBase user pass opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ _ _ <- ask
     writeLog $ "postWith': " ++ show (x, v)
     liftIO $ postWithE opts (host ++ apiBase ++ x) v
 
 -- | Wrapper around Wreq's 'putWith' that uses our settings in a 'ReaderT'.
 putWith' :: String -> Value -> ReaderT MyTardisConfig IO (Response BL.ByteString)
 putWith' x v = do
-    MyTardisConfig host apiBase user pass opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase user pass opts _ _ _ _ _ _ <- ask
     writeLog $ "putWith': " ++ show (x, v)
     liftIO $ putWith opts (host ++ apiBase ++ x) v
 
@@ -199,7 +201,7 @@ getFileWithMetadata idf = getResourceWithMetadata (getDatasetFiles $ idfDatasetU
 getDatasetFiles :: URI -> ReaderT MyTardisConfig IO (Result [RestDatasetFile])
 getDatasetFiles uri = do
     writeLog $ "getDatasetFiles: uri: " ++ show uri
-    MyTardisConfig _ apiBase _ _ _ _ _ _ _ _ <- ask
+    MyTardisConfig _ apiBase _ _ _ _ _ _ _ _ _ <- ask
     getList $ dropIfPrefix apiBase $ uri ++ "files"
 
 -- | Create an experiment. If an experiment already exists in MyTARDIS that matches our
@@ -222,7 +224,8 @@ createExperiment ie@(IdentifiedExperiment description instutitionName title meta
 
                               return $ Success re
         Left NoMatches  -> do writeLog "createExperiment: no matches, creating the experiment resource."
-                              createResource "/experiment/" getExperiment m
+                              prefix <- mytardisApiPrefix <$> ask
+                              createResource ("/" ++ prefix ++ "experiment/") getExperiment m
         Left  err       -> do writeLog $ "Error when trying to create group: " ++ show err
                               return $ Error $ show err
   where
@@ -275,7 +278,8 @@ createUser
     -> ReaderT MyTardisConfig IO (Result RestUser)  -- ^ The new user resource.
 createUser firstname lastname username groups isSuperuser = do
     writeLog $ "createUser: " ++ show (firstname, lastname, username, groups, isSuperuser)
-    createResource "/user/" getUser m
+    prefix <- mytardisApiPrefix <$> ask
+    createResource ("/" ++ prefix ++ "user/") getUser m
   where
     m = object
             [ ("first_name",    String $ T.pack $ fromMaybe "" firstname)
@@ -320,7 +324,8 @@ createDataset ids@(IdentifiedDataset description experiments metadata) = do
         Right rds       -> do writeLog "createDataset: found existing dataset, returning that."
                               return $ Success rds
         Left NoMatches  -> do writeLog "createDataset: no matches found, creating new dataset."
-                              createResource "/dataset/" getDataset m
+                              prefix <- mytardisApiPrefix <$> ask
+                              createResource ("/" ++ prefix ++ "dataset/") getDataset m
         Left  _         -> do writeLog "createDataset: duplicates found, refusing to create another."
                               return $ Error "Duplicate dataset detected, will not create another."
 
@@ -339,7 +344,8 @@ createGroup
     -> ReaderT MyTardisConfig IO (Result RestGroup) -- ^ The newly created group.
 createGroup name = do
     writeLog $ "createGroup: " ++ show name
-    createResource "/group/" getGroup x
+    prefix <- mytardisApiPrefix <$> ask
+    createResource ("/" ++ prefix ++ "group/") getGroup x
   where
     x = object
             [ ("name",          String $ T.pack name)
@@ -356,7 +362,8 @@ createExperimentObjectACL
     -> ReaderT MyTardisConfig IO (Result RestObjectACL) -- ^ The new ObjectACL resource.
 createExperimentObjectACL canDelete canRead canWrite group experiment = do
     writeLog $ "createExperimentObjectACL : " ++ show (canDelete, canRead, canWrite, group, experiment)
-    createResource "/objectacl/" getObjectACL x
+    prefix <- mytardisApiPrefix <$> ask
+    createResource ("/" ++ prefix ++ "objectacl/") getObjectACL x
   where
     x = object
             [ ("aclOwnershipType",  toJSON (1 :: Integer))
@@ -418,7 +425,8 @@ createFileLocation datasetID idf@(IdentifiedFile datasetURL filepath md5sum size
                                         , ("parameter_sets",    toJSON $ map mkParameterSet metadata)
                                         , ("replicas",          toJSON $ mkSharedLocation (show datasetID) [(takeFileName filepath, "imagetrove")]) -- FIXME hardcoded Location name
                                         ] in do writeLog "No matches, creating resource."
-                                                dsfNew <- createResource "/dataset_file/" getDatasetFile m
+                                                prefix <- mytardisApiPrefix <$> ask
+                                                dsfNew <- createResource ("/" ++ prefix ++ "dataset_file/") getDatasetFile m
                                                 case dsfNew of
                                                     Success dsfNew' -> return $ Success $ NewFile dsfNew'
                                                     Error    e      -> return $ Error e
@@ -436,7 +444,7 @@ getResource :: forall a. FromJSON a => URI -> ReaderT MyTardisConfig IO (Result 
 getResource uri = do
     writeLog $ "getResource: " ++ uri
 
-    MyTardisConfig host _ _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host _ _ _ opts _ _ _ _ _ _ <- ask
     r <- liftIO $ getWithE opts (host ++ uri)
 
     case r of
@@ -524,7 +532,7 @@ getList :: forall a. FromJSON a => String -> ReaderT MyTardisConfig IO (Result [
 getList url = do
     writeLog $ "getList: " ++ url
 
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ _ <- ask
     body <- liftIO $ (fmap (^? responseBody)) <$> getWithE opts (host ++ apiBase ++ url)
 
     case body of
@@ -562,27 +570,39 @@ dropIfPrefix prefix s = if prefix `isPrefixOf` s
 
 -- | Retrieve all experiment parameter sets.
 getExperimentParameterSets :: ReaderT MyTardisConfig IO (Result [RestExperimentParameterSet])
-getExperimentParameterSets = getList "/experimentparameterset"
+getExperimentParameterSets = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "experimentparameterset")
 
 -- | Retrieve all experiment parameters.
 getExperimentParameters :: ReaderT MyTardisConfig IO (Result [RestParameter])
-getExperimentParameters = getList "/experimentparameter"
+getExperimentParameters = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "experimentparameter")
 
 -- | Retrieve all experiments.
 getExperiments :: ReaderT MyTardisConfig IO (Result [RestExperiment])
-getExperiments = getList "/experiment"
+getExperiments = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "experiment")
 
 -- | Retrieve all datasets.
 getDatasets :: ReaderT MyTardisConfig IO (Result [RestDataset])
-getDatasets = getList "/dataset"
+getDatasets = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "dataset")
 
 -- | Retrieve all files.
 getAllDatasetFiles :: ReaderT MyTardisConfig IO (Result [RestDatasetFile])
-getAllDatasetFiles = getList "/dataset_file"
+getAllDatasetFiles = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "dataset_file")
 
 -- | Retrieve all replicas.
 getReplicas :: ReaderT MyTardisConfig IO (Result [RestReplica])
-getReplicas = getList "/replica"
+getReplicas = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "replica")
 
 -- | Retrieve all schemas.
 getSchemas :: ReaderT MyTardisConfig IO (Result [RestSchema])
@@ -590,7 +610,9 @@ getSchemas = getList "/schema"
 
 -- | Retrieve all permissions.
 getPermissions :: ReaderT MyTardisConfig IO (Result [RestPermission])
-getPermissions = getList "/permission"
+getPermissions = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "permission")
 
 -- | Retrieve all parameter names.
 -- getParameterNames :: ReaderT MyTardisConfig IO (Result [RestParameterName])
@@ -598,7 +620,9 @@ getPermissions = getList "/permission"
 
 -- | Retrieve all groups.
 getGroups :: ReaderT MyTardisConfig IO (Result [RestGroup])
-getGroups = getList "/group"
+getGroups = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "group")
 
 -- | Retrieve all users.
 getUsers :: ReaderT MyTardisConfig IO (Result [RestUser])
@@ -606,7 +630,9 @@ getUsers = getList "/user"
 
 -- | Retrieve all ObjectACLs.
 getObjectACLs :: ReaderT MyTardisConfig IO (Result [RestObjectACL])
-getObjectACLs = getList "/objectacl"
+getObjectACLs = do
+    prefix <- mytardisApiPrefix <$> ask
+    getList ("/" ++ prefix ++ "objectacl")
 
 -- | Retrieve all replicas that are not verified.
 getUnverifiedReplicas :: ReaderT MyTardisConfig IO (Result [RestReplica])
@@ -622,7 +648,7 @@ copyFileToStore
 copyFileToStore filepath dsf = do
     writeLog $ "copyFileToStore: " ++ show (filepath, dsf)
 
-    MyTardisConfig _ _ _ _ _ _ _ mytardisDir _ _ <- ask
+    MyTardisConfig _ _ _ _ _ _ _ mytardisDir _ _ _ <- ask
 
     results <- forM (dsfReplicas dsf) $ \r -> do
         let filePrefix = "file://" :: String
@@ -653,28 +679,28 @@ copyFileToStore filepath dsf = do
 deleteExperiment :: RestExperiment -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteExperiment x = do
     writeLog $ "deleteExperiment: deleting experiment with ID " ++ show (eiID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ _ <- ask
     liftIO $ deleteWithE opts $ host ++ eiResourceURI x
 
 -- | Delete a dataset.
 deleteDataset :: RestDataset -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteDataset x = do
     writeLog $ "deleteDataset: deleting dataset with ID " ++ show (dsiID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ _ <- ask
     liftIO $ deleteWithE opts $ host ++ dsiResourceURI x
 
 -- | Delete a dataset file.
 deleteDatasetFile :: RestDatasetFile -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteDatasetFile x = do
     writeLog $ "deleteDatasetFile: deleting dataset file with ID " ++ show (dsfID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ _ <- ask
     liftIO $ deleteWithE opts $ host ++ dsfResourceURI x
 
 -- | Delete a parameter.
 deleteParameter :: RestParameter -> ReaderT MyTardisConfig IO (Either String (Response BL.ByteString))
 deleteParameter x = do
     writeLog $ "deleteParameter: deleting parameter with ID " ++ show (epID x)
-    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ <- ask
+    MyTardisConfig host apiBase _ _ opts _ _ _ _ _ _ <- ask
     liftIO $ deleteWithE opts $ host ++ epResourceURI x
 
 restExperimentToIdentified :: RestExperiment -> ReaderT MyTardisConfig IO IdentifiedExperiment

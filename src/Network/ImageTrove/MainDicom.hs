@@ -708,6 +708,8 @@ getConfig host orthHost f debug = do
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
 
+    prefix  <- lookup cfg "prefix"  :: IO (Maybe String)
+
     ohost <- lookup cfg "orthanc_host" :: IO (Maybe String)
     let ohost' = if isNothing ohost then orthHost else fromJust ohost
 
@@ -719,9 +721,10 @@ getConfig host orthHost f debug = do
 
     hSetBuffering stdin NoBuffering
 
-    return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug tmp'
-        _                        -> Nothing
+    return $ case (user, pass, prefix) of
+        (Just user', Just pass', Nothing)      -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug tmp' ""
+        (Just user', Just pass', Just prefix') -> Just $ defaultMyTardisOptions host user' pass' ohost' mytardisDir' debug tmp' prefix'
+        _                                      -> Nothing
 
 type InstrumentConfig = (String,
                          [DicomFile -> Bool],
@@ -838,7 +841,7 @@ data MVars = MVars (MVar (AcidAction,              MVar AcidOutput))
 
 imageTroveMain :: IO ()
 imageTroveMain = do
-    let host = "http://localhost:8005" -- "https://imagetrove.cai.uq.edu.au"
+    let host = "http://localhost:8020" -- "https://imagetrove.cai.uq.edu.au"
         f    = "debug_3T.conf"
         orthHost = "http://localhost:8043"
         debug    = False
@@ -852,7 +855,7 @@ imageTroveMain = do
 
                                    -- forM_ instrumentConfigs $ \iconfig -> runReaderT (runDCMTK f iconfig "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
                                    -- runReaderT (runDCMTK f instrumentConfigs "/export/nif02/imagetrove/production/dcmtk-store-transfer/") mytardisOpts'
-                                   runReaderT (runDCMTK f instrumentConfigs "/export/nif02/imagetrove/test/") mytardisOpts'
+                                   runReaderT (runDCMTK f instrumentConfigs "/export/nif02/uqchamal/mytardis_develop/dcmtk_test_input/") mytardisOpts'
         _                    -> error $ "Could not read config file: " ++ f
 
 nrWorkersGlobal = 20

@@ -100,6 +100,8 @@ getConfig host f debug = do
     user    <- lookup cfg "user"    :: IO (Maybe String)
     pass    <- lookup cfg "pass"    :: IO (Maybe String)
 
+    prefix  <- lookup cfg "prefix"  :: IO (Maybe String)
+
     mytardisDir <- lookup cfg "mytardis_directory" :: IO (Maybe String)
     let mytardisDir' = if isNothing mytardisDir then "/imagetrove" else fromJust mytardisDir
 
@@ -108,9 +110,10 @@ getConfig host f debug = do
 
     hSetBuffering stdin NoBuffering
 
-    return $ case (user, pass) of
-        (Just user', Just pass') -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug tmp'
-        _                        -> Nothing
+    return $ case (user, pass, prefix) of
+        (Just user', Just pass', Nothing)      -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug tmp' ""
+        (Just user', Just pass', Just prefix') -> Just $ defaultMyTardisOptions host user' pass' "http://127.0.0.1:8443" mytardisDir' debug tmp' prefix'
+        _                                      -> Nothing
 
 readInstrumentConfigs
   :: FilePath

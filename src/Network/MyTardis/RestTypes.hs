@@ -318,10 +318,10 @@ instance FromJSON RestDatasetFile where
 data RestReplica = RestReplica
     { replicaDatafile           :: String       -- ^ URI for the file.
     , replicaID                 :: Integer
-    , replicaLocation           :: String       -- ^ URI for the location where this file is stored (see the Location model in MyTARDIS).
-    , replicaProtocol           :: Maybe String
+    -- , replicaLocation           :: String       -- ^ URI for the location where this file is stored (see the Location model in MyTARDIS).
+    -- , replicaProtocol           :: Maybe String
     , replicaResourceURI        :: String       -- ^ URI for this replica.
-    , replicaStayRemote         :: Bool
+    -- , replicaStayRemote         :: Bool
     , replicaURL                :: String       -- ^ URL to this file, not including location, e.g. \"11\/11\/foo.mnc\",
     , replicaVerified           :: Bool         -- ^ Has MyTARDIS verified the file's checksum?
     } deriving (Eq, Show)
@@ -330,11 +330,11 @@ instance FromJSON RestReplica where
     parseJSON (Object v) = RestReplica <$>
         v .: "datafile"         <*>
         v .: "id"               <*>
-        v .: "location"         <*>
-        v .: "protocol"         <*>
+        -- v .: "location"         <*>
+        -- v .: "protocol"         <*>
         v .: "resource_uri"     <*>
-        v .: "stay_remote"      <*>
-        v .: "url"              <*>
+        -- v .: "stay_remote"      <*>
+        v .: "uri"              <*>
         v .: "verified"
     parseJSON _          = mzero
 
